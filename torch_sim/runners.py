@@ -32,11 +32,11 @@ logger = logging.getLogger(__name__)
 
 
 def _configure_reporter(
-    trajectory_reporter: TrajectoryReporter | dict,
-    *,
-    properties: list[str] | None = None,
-    prop_frequency: int = 10,
-    state_frequency: int = 100,
+        trajectory_reporter: TrajectoryReporter | dict,
+        *,
+        properties: list[str] | None = None,
+        prop_frequency: int = 10,
+        state_frequency: int = 100,
 ) -> TrajectoryReporter:
     if isinstance(trajectory_reporter, TrajectoryReporter):
         return trajectory_reporter
@@ -48,7 +48,7 @@ def _configure_reporter(
             velocities=state.velocities, masses=state.masses
         ),
         "temperature": lambda state: state.calc_temperature(),
-        "max_force": ts.system_wise_max_force,
+        "max_force": lambda state: ts.system_wise_max_force(state),
     }
 
     prop_calculators = {
@@ -69,10 +69,10 @@ def _configure_reporter(
 
 
 def _configure_batches_iterator(
-    state: SimState,
-    model: ModelInterface,
-    *,
-    autobatcher: BinningAutoBatcher | bool,
+        state: SimState,
+        model: ModelInterface,
+        *,
+        autobatcher: BinningAutoBatcher | bool,
 ) -> BinningAutoBatcher | list[tuple[SimState, list[int]]]:
     """Create a batches iterator for the integrate function.
 
@@ -106,7 +106,7 @@ def _configure_batches_iterator(
 
 
 def _determine_initial_step_for_integrate(
-    trajectory_reporter: TrajectoryReporter | None,
+        trajectory_reporter: TrajectoryReporter | None,
 ) -> int:
     """Determine the initial step for resuming integration from trajectory files.
 
@@ -143,8 +143,8 @@ def _determine_initial_step_for_integrate(
 
 
 def _determine_initial_step_for_optimize(
-    trajectory_reporter: TrajectoryReporter | None,
-    state: SimState,
+        trajectory_reporter: TrajectoryReporter | None,
+        state: SimState,
 ) -> torch.LongTensor:
     """Determine the initial steps for resuming optimization from trajectory files.
 
@@ -171,7 +171,7 @@ def _determine_initial_step_for_optimize(
 
 
 def _normalize_temperature_tensor(
-    temperature: float | list | torch.Tensor, n_steps: int, initial_state: SimState
+        temperature: float | list | torch.Tensor, n_steps: int, initial_state: SimState
 ) -> torch.Tensor:
     """Turn the temperature into a tensor of shape (n_steps,) or (n_steps, n_systems).
 
@@ -241,9 +241,9 @@ def _normalize_temperature_tensor(
 
 
 def _write_initial_state(
-    trajectory_reporter: TrajectoryReporter | None,
-    state: SimState,
-    model: ModelInterface,
+        trajectory_reporter: TrajectoryReporter | None,
+        state: SimState,
+        model: ModelInterface,
 ) -> None:
     """Write initial state (step 0) to trajectory if conditions are met.
 
@@ -265,24 +265,32 @@ def _write_initial_state(
 
 
 def integrate[T: SimState](  # noqa: C901
-    system: StateLike,
-    model: ModelInterface,
-    *,
-    integrator: Integrator | tuple[Callable[..., T], Callable[..., T]],
-    n_steps: int,
-    temperature: float | list | torch.Tensor,
-    timestep: float,
-    trajectory_reporter: TrajectoryReporter | dict | None = None,
-    autobatcher: BinningAutoBatcher | bool = False,
-    pbar: bool | dict[str, Any] = False,
-    init_kwargs: dict[str, Any] | None = None,
-    **integrator_kwargs: Any,
+        system: StateLike,
+        model: ModelInterface,
+        system_modifier: dict[str, Any]=None,
+        *,
+        integrator: Integrator | tuple[Callable[..., T], Callable[..., T]],
+        n_steps: int,
+        temperature: float | list | torch.Tensor,
+        timestep: float,
+        trajectory_reporter: TrajectoryReporter | dict | None = None,
+        autobatcher: BinningAutoBatcher | bool = False,
+        pbar: bool | dict[str, Any] = False,
+        init_kwargs: dict[str, Any] | None = None,
+        **integrator_kwargs: Any,
 ) -> T:
     """Simulate a system using a model and integrator.
 
     Args:
         system (StateLike): Input system to simulate
         model (ModelInterface): Neural network model module
+        system_modifier (dict[int, Any], optional): Controls how the simulation state is mutated during the run.
+            If `None` no intermediate modification is performed.
+            Expects: {'modification_freq': int, 'modification_func': Callable[[SimState, **kwargs], SimState], 'kwargs': dict}
+            modification_freq (int): Number of steps between each call to modification_func.
+            modification_func (Callable[SimState, **kwargs]): Function that receives the current SimState and optional keyword
+                arguments, returns the updated SimState.
+            kwargs (dict, optional): Additional arguments passed to 'modification_func'.
         integrator (Integrator | tuple): Either a key from Integrator or a tuple of
             (init_func, step_func) functions.
         n_steps (int): Number of integration steps. If resuming from a trajectory, this
@@ -298,7 +306,8 @@ def integrate[T: SimState](  # noqa: C901
             tracking trajectory. If a dict, will be passed to the TrajectoryReporter
             constructor.
         autobatcher (BinningAutoBatcher | bool): Optional autobatcher to use
-        pbar (bool | dict[str, Any], optional): Show a progress bar. If a dict is given,
+        pbar (bool | dict[str, Any], optional): Show a progress bar.
+            Only works with an autobatcher in interactive shell. If a dict is given,
             it's passed to `tqdm` as kwargs.
         init_kwargs (dict[str, Any], optional): Additional keyword arguments for
             integrator init function.
@@ -306,6 +315,7 @@ def integrate[T: SimState](  # noqa: C901
 
     Returns:
         T: Final state after integration
+        :param system_modifiers:
     """
     unit_system = UnitSystem.metal
 
@@ -319,9 +329,9 @@ def integrate[T: SimState](  # noqa: C901
     if isinstance(integrator, Integrator):
         init_func, step_func = INTEGRATOR_REGISTRY[integrator]
     elif (
-        isinstance(integrator, tuple)
-        and len(integrator) == 2
-        and {*map(callable, integrator)} == {True}
+            isinstance(integrator, tuple)
+            and len(integrator) == 2
+            and {*map(callable, integrator)} == {True}
     ):
         init_func, step_func = integrator
     else:
@@ -344,15 +354,12 @@ def integrate[T: SimState](  # noqa: C901
     final_states: list[T] = []
     og_filenames = trajectory_reporter.filenames if trajectory_reporter else None
 
-    # Extract pbar kwargs for both outer and inner progress bars
-    pbar_kwargs = pbar if isinstance(pbar, dict) else {}
-
     tqdm_pbar = None
     if pbar and autobatcher:
-        outer_pbar_kwargs = pbar_kwargs.copy()
-        outer_pbar_kwargs.setdefault("desc", "Integrate")
-        outer_pbar_kwargs.setdefault("disable", None)
-        tqdm_pbar = tqdm(total=initial_state.n_systems, **outer_pbar_kwargs)
+        pbar_kwargs = pbar if isinstance(pbar, dict) else {}
+        pbar_kwargs.setdefault("desc", "Integrate")
+        pbar_kwargs.setdefault("disable", None)
+        tqdm_pbar = tqdm(total=initial_state.n_systems, **pbar_kwargs)
 
     # Handle both BinningAutoBatcher and list of tuples
     for state, system_indices in batch_iterator:
@@ -374,16 +381,18 @@ def integrate[T: SimState](  # noqa: C901
         # Save initial state into step 0
         _write_initial_state(trajectory_reporter, state, model)
 
+        # prepare system_modifier if provided
+        if system_modifier is not None:
+            modification_frequency = system_modifier['modification_freq']
+            modification_func = system_modifier['modification_func']
+            # use .get to default to {} if kwargs not provided
+            modification_kwargs = system_modifier.get('kwargs', {})
         # run the simulation
-        inner_pbar_kwargs = pbar_kwargs.copy()
-        inner_pbar_kwargs.setdefault("disable", pbar is False)
-        inner_pbar_kwargs.setdefault(
-            "desc", f"Batch systems {system_indices}" if system_indices else "Integrate"
-        )
-        inner_pbar_kwargs.setdefault("leave", False)
-        for step in tqdm(
-            range(initial_step, initial_step + n_steps), **inner_pbar_kwargs
-        ):
+        for step in range(initial_step, initial_step + n_steps):
+            # Modify the system_state based on system_modifier logic
+            if not system_modifier is None and step % modification_frequency == 0 :
+                state = modification_func(state, **modification_kwargs)
+
             state = step_func(
                 state=state,
                 model=model,
@@ -411,11 +420,11 @@ def integrate[T: SimState](  # noqa: C901
 
 
 def _configure_in_flight_autobatcher(
-    state: SimState,
-    model: ModelInterface,
-    *,
-    autobatcher: InFlightAutoBatcher | bool,
-    max_iterations: int,  # TODO: change name to max_iterations
+        state: SimState,
+        model: ModelInterface,
+        *,
+        autobatcher: InFlightAutoBatcher | bool,
+        max_iterations: int,  # TODO: change name to max_iterations
 ) -> InFlightAutoBatcher:
     """Configure the hot swapping autobatcher for the optimize function.
 
@@ -455,11 +464,11 @@ def _configure_in_flight_autobatcher(
 
 
 def _chunked_apply[T: SimState](
-    fn: Callable[..., T],
-    states: SimState,
-    model: ModelInterface,
-    init_kwargs: Any,
-    **batcher_kwargs: Any,
+        fn: Callable[..., T],
+        states: SimState,
+        model: ModelInterface,
+        init_kwargs: Any,
+        **batcher_kwargs: Any,
 ) -> T:
     """Apply a function to a state in chunks.
 
@@ -489,7 +498,7 @@ def _chunked_apply[T: SimState](
 
 
 def generate_force_convergence_fn[T: MDState | FireState](
-    force_tol: float = 1e-1, *, include_cell_forces: bool = False
+        force_tol: float = 1e-1, *, include_cell_forces: bool = False
 ) -> Callable:
     """Generate a force-based convergence function for the convergence_fn argument
     of the optimize function.
@@ -505,8 +514,8 @@ def generate_force_convergence_fn[T: MDState | FireState](
     """
 
     def convergence_fn(
-        state: T,
-        last_energy: torch.Tensor | None = None,  # noqa: ARG001
+            state: T,
+            last_energy: torch.Tensor | None = None,  # noqa: ARG001
     ) -> torch.Tensor:
         """Check if the system has converged.
 
@@ -529,7 +538,7 @@ def generate_force_convergence_fn[T: MDState | FireState](
 
 
 def generate_energy_convergence_fn[T: MDState | OptimState](
-    energy_tol: float = 1e-3,
+        energy_tol: float = 1e-3,
 ) -> Callable[[T, torch.Tensor | None], torch.Tensor]:
     """Generate an energy-based convergence function for the convergence_fn argument
     of the optimize function.
@@ -555,18 +564,18 @@ def generate_energy_convergence_fn[T: MDState | OptimState](
 
 
 def optimize[T: OptimState](  # noqa: C901, PLR0915
-    system: StateLike,
-    model: ModelInterface,
-    *,
-    optimizer: Optimizer | tuple[Callable[..., T], Callable[..., T]],
-    convergence_fn: Callable[[T, torch.Tensor | None], torch.Tensor] | None = None,
-    max_steps: int = 10_000,
-    steps_between_swaps: int = 5,
-    trajectory_reporter: TrajectoryReporter | dict | None = None,
-    autobatcher: InFlightAutoBatcher | bool = False,
-    pbar: bool | dict[str, Any] = False,
-    init_kwargs: dict[str, Any] | None = None,
-    **optimizer_kwargs: Any,
+        system: StateLike,
+        model: ModelInterface,
+        *,
+        optimizer: Optimizer | tuple[Callable[..., T], Callable[..., T]],
+        convergence_fn: Callable[[T, torch.Tensor | None], torch.Tensor] | None = None,
+        max_steps: int = 10_000,
+        steps_between_swaps: int = 5,
+        trajectory_reporter: TrajectoryReporter | dict | None = None,
+        autobatcher: InFlightAutoBatcher | bool = False,
+        pbar: bool | dict[str, Any] = False,
+        init_kwargs: dict[str, Any] | None = None,
+        **optimizer_kwargs: Any,
 ) -> T:
     """Optimize a system using a model and optimizer.
 
@@ -609,9 +618,9 @@ def optimize[T: OptimState](  # noqa: C901, PLR0915
     if isinstance(optimizer, Optimizer):
         init_fn, step_fn = OPTIM_REGISTRY[optimizer]
     elif (
-        isinstance(optimizer, tuple)
-        and len(optimizer) == 2
-        and {*map(callable, optimizer)} == {True}
+            isinstance(optimizer, tuple)
+            and len(optimizer) == 2
+            and {*map(callable, optimizer)} == {True}
     ):
         init_fn, step_fn = optimizer
     else:
@@ -674,9 +683,9 @@ def optimize[T: OptimState](  # noqa: C901, PLR0915
 
         # need to update the trajectory reporter if any states have converged
         if (
-            trajectory_reporter is not None
-            and og_filenames is not None
-            and ((step[autobatcher.current_idx] == 1).any() or len(converged_states) > 0)
+                trajectory_reporter is not None
+                and og_filenames is not None
+                and ((step[autobatcher.current_idx] == 1).any() or len(converged_states) > 0)
         ):
             trajectory_reporter.reopen_trajectories(
                 filenames=[og_filenames[i] for i in autobatcher.current_idx]
@@ -703,7 +712,7 @@ def optimize[T: OptimState](  # noqa: C901, PLR0915
         convergence_tensor = convergence_fn(state, last_energy)
         # Mark states that exceeded max steps as converged to remove them from batch
         convergence_tensor = (
-            convergence_tensor | exceeded_max_steps[autobatcher.current_idx]
+                convergence_tensor | exceeded_max_steps[autobatcher.current_idx]
         )
         if tqdm_pbar:
             # assume convergence_tensor shape is correct
@@ -720,12 +729,12 @@ def optimize[T: OptimState](  # noqa: C901, PLR0915
 
 
 def static(
-    system: StateLike,
-    model: ModelInterface,
-    *,
-    trajectory_reporter: TrajectoryReporter | dict | None = None,
-    autobatcher: BinningAutoBatcher | bool = False,
-    pbar: bool | dict[str, Any] = False,
+        system: StateLike,
+        model: ModelInterface,
+        *,
+        trajectory_reporter: TrajectoryReporter | dict | None = None,
+        autobatcher: BinningAutoBatcher | bool = False,
+        pbar: bool | dict[str, Any] = False,
 ) -> list[dict[str, torch.Tensor]]:
     """Run single point calculations on a batch of systems.
 
@@ -773,7 +782,7 @@ def static(
     trajectory_reporter = _configure_reporter(
         trajectory_reporter or dict(filenames=None),
         properties=properties,
-    )
+        )
 
     @dataclass(kw_only=True)
     class StaticState(SimState):
