@@ -12,6 +12,12 @@ utility class assists in data storage without frequent reallocations.
 The ``VelocityAutoCorrelation`` class provides an interface for
 computing the velocity autocorrelation functions (VACF).
 
+The ``RadialDistributionFunction`` class accumulates on-the-fly pair-distance
+histograms to compute g(r) with full PBC support.
+
+The ``PressureAutoCorrelation`` class computes the off-diagonal pressure
+tensor autocorrelation function, enabling Green-Kubo viscosity estimates.
+
 References:
     .. [1] D. Frenkel and B. Smit, "Understanding molecular simulation: From
        algorithms to applications", Academic Press, 2002.
@@ -21,10 +27,11 @@ References:
 from collections.abc import Callable
 from typing import Any
 
+import numpy as np
 import torch
 
 from torch_sim.elastic import full_3x3_to_voigt_6_stress
-from torch_sim.quantities import calc_heat_flux
+from torch_sim.quantities import calc_heat_flux, compute_instantaneous_pressure_tensor
 from torch_sim.state import SimState
 
 
@@ -580,3 +587,298 @@ class HeatFluxAutoCorrelation:
     def hfacf(self) -> torch.Tensor:
         """Current HFACF result."""
         return self._avg
+
+
+class RadialDistributionFunction:
+    """On-the-fly radial distribution function calculator.
+
+    Accumulates pair-distance histograms over trajectory frames and
+    returns the normalized g(r) averaged over all sampled frames.
+    Handles periodic boundary conditions via the minimum-image convention
+    using fractional coordinates.
+
+    Supports optional species-pair filtering for multi-element systems.
+
+    Using ``RadialDistributionFunction`` with
+    :class:`~ts.trajectory.TrajectoryReporter`::
+
+        rdf_calc = RadialDistributionFunction(
+            r_max=8.0,
+            n_bins=200,
+            device=device,
+        )
+        reporter = TrajectoryReporter(
+            "simulation.h5",
+            prop_calculators={10: {"rdf": rdf_calc}},
+        )
+        # After simulation:
+        r, gr = rdf_calc.gr
+
+    """
+
+    def __init__(
+        self,
+        *,
+        r_max: float,
+        n_bins: int,
+        device: torch.device,
+        species_pair: tuple[int, int] | None = None,
+    ) -> None:
+        """Initialize RDF calculator.
+
+        Args:
+            r_max: Maximum pair distance to histogram (Å).
+            n_bins: Number of histogram bins.
+            device: Computation device.
+            species_pair: If given as ``(Zi, Zj)``, only count pairs between
+                those atomic numbers. ``None`` counts all pairs.
+        """
+        self.r_max = r_max
+        self.n_bins = n_bins
+        self.device = device
+        self.species_pair = species_pair
+
+        edges = torch.linspace(0.0, r_max, n_bins + 1, device=device, dtype=torch.float64)
+        self.r_edges = edges
+        self.r_centers = 0.5 * (edges[:-1] + edges[1:])
+
+        self._hist = torch.zeros(n_bins, device=device, dtype=torch.float64)
+        self._frame_count = 0
+        self._n_atoms_sum = 0
+        self._volume_sum = 0.0
+
+    def __call__(self, state: SimState, _: Any = None) -> torch.Tensor:
+        """Accumulate one frame into the histogram.
+
+        Args:
+            state: Current simulation state (single system).
+            _: Unused model argument.
+
+        Returns:
+            Tensor containing the current frame count.
+        """
+        pos = state.positions.to(torch.float64)   # (n, 3)
+        cell = state.cell[0].to(torch.float64)    # (3, 3), rows = lattice vectors
+        n = pos.shape[0]
+
+        # All pairwise displacement vectors: (n, n, 3)
+        dr = pos.unsqueeze(0) - pos.unsqueeze(1)
+
+        # Minimum image via fractional coordinates: s = dr @ cell⁻¹
+        cell_inv = torch.linalg.inv(cell)
+        dr_frac = dr @ cell_inv.T
+        dr_frac = dr_frac - torch.round(dr_frac)
+        dr_cart = dr_frac @ cell.T
+
+        dists = torch.linalg.norm(dr_cart, dim=-1)  # (n, n)
+
+        # Upper-triangle mask (i < j) to avoid double-counting
+        mask = torch.triu(torch.ones(n, n, device=self.device, dtype=torch.bool), diagonal=1)
+
+        if self.species_pair is not None:
+            z = state.atomic_numbers
+            zi, zj = self.species_pair
+            sp_mask = (
+                (z.unsqueeze(0) == zi) & (z.unsqueeze(1) == zj)
+            ) | (
+                (z.unsqueeze(0) == zj) & (z.unsqueeze(1) == zi)
+            )
+            mask = mask & sp_mask
+
+        dists_flat = dists[mask]
+        dists_flat = dists_flat[dists_flat < self.r_max]
+
+        hist = torch.histc(
+            dists_flat.float(), bins=self.n_bins, min=0.0, max=float(self.r_max)
+        )
+        # Multiply by 2 so both (i,j) and (j,i) are counted
+        self._hist += hist.to(torch.float64) * 2
+
+        self._frame_count += 1
+        self._n_atoms_sum += n
+        self._volume_sum += torch.det(cell).abs().item()
+
+        return torch.tensor([self._frame_count], device=state.device)
+
+    @property
+    def gr(self) -> tuple[torch.Tensor, torch.Tensor]:
+        """Normalized g(r) averaged over accumulated frames.
+
+        Returns:
+            Tuple ``(r_centers, g_values)`` on CPU, both shape ``(n_bins,)``.
+            ``r_centers`` is in Å.  Returns zeros if no frames accumulated.
+        """
+        if self._frame_count == 0:
+            return self.r_centers.cpu(), torch.zeros(self.n_bins)
+
+        avg_n = self._n_atoms_sum / self._frame_count
+        avg_vol = self._volume_sum / self._frame_count
+        rho = avg_n / avg_vol  # Å⁻³
+
+        shell_vol = (4.0 / 3.0) * torch.pi * (
+            self.r_edges[1:] ** 3 - self.r_edges[:-1] ** 3
+        )
+        ideal = avg_n * rho * shell_vol
+
+        g = (self._hist / self._frame_count) / ideal
+        return self.r_centers.cpu(), g.cpu()
+
+    def reset(self) -> None:
+        """Reset all accumulated data."""
+        self._hist.zero_()
+        self._frame_count = 0
+        self._n_atoms_sum = 0
+        self._volume_sum = 0.0
+
+
+class PressureAutoCorrelation:
+    """Calculator for pressure tensor autocorrelation function (PACF) for viscosity.
+
+    Computes the Green-Kubo shear viscosity via:
+
+        η = (V / kT) ∫₀^∞ < P_αβ(0) · P_αβ(t) > dt
+
+    where the average runs over the three independent off-diagonal components
+    Pxy, Pxz, Pyz.  Uses an FFT-based circular-window estimator identical in
+    spirit to ``VelocityAutoCorrelation``.
+
+    Requires the model to return ``'stress'`` [n_systems, 3, 3] in eV/Å³.
+
+    Using ``PressureAutoCorrelation`` with
+    :class:`~ts.trajectory.TrajectoryReporter`::
+
+        pacf_calc = PressureAutoCorrelation(
+            model=model,
+            window_size=500,
+            temperature=600.0,
+            device=device,
+        )
+        reporter = TrajectoryReporter(
+            "simulation.h5",
+            prop_calculators={1: {"pacf": pacf_calc}},
+        )
+        # After simulation:
+        eta = pacf_calc.viscosity(timestep_ps=0.001)
+
+    """
+
+    def __init__(
+        self,
+        *,
+        model: torch.nn.Module,
+        window_size: int,
+        temperature: float,
+        device: torch.device,
+        use_running_average: bool = True,
+    ) -> None:
+        """Initialize PACF calculator.
+
+        Args:
+            model: MLIP model; must return ``'stress'`` tensor.
+            window_size: Correlation window length (steps).
+            temperature: Simulation temperature in Kelvin (for viscosity prefactor).
+            device: Computation device.
+            use_running_average: Accumulate a running average across windows.
+        """
+        self.model = model
+        self.temperature = temperature
+        self.window_size = window_size
+        self.device = device
+        self.use_running_average = use_running_average
+
+        # Circular buffer storing (Pxy, Pxz, Pyz) at each step: shape (window_size, 3)
+        self._buffer = torch.zeros(window_size, 3, device=device, dtype=torch.float64)
+        self._pos = 0
+        self._count = 0
+
+        self._window_count = 0
+        self._avg = torch.zeros(window_size, device=device, dtype=torch.float64)
+        self._volume_sum = 0.0
+        self._call_count = 0
+
+    def _shear_components(self, state: SimState) -> torch.Tensor:
+        """Return (Pxy, Pxz, Pyz) in eV/Å³ for system 0."""
+        out = self.model(state)
+        P = compute_instantaneous_pressure_tensor(
+            momenta=state.momenta,
+            masses=state.masses,
+            system_idx=state.system_idx,
+            stress=out["stress"],
+            volumes=state.volume,
+        )  # (n_systems, 3, 3)
+        return torch.stack([P[0, 0, 1], P[0, 0, 2], P[0, 1, 2]]).to(torch.float64)
+
+    def __call__(self, state: SimState, _: Any = None) -> torch.Tensor:
+        """Record one pressure sample and update the running PACF.
+
+        Args:
+            state: Current simulation state.
+            _: Unused model argument.
+
+        Returns:
+            Tensor containing the current completed window count.
+        """
+        shear = self._shear_components(state).detach()
+
+        self._buffer[self._pos] = shear
+        self._pos = (self._pos + 1) % self.window_size
+        self._count = min(self._count + 1, self.window_size)
+        self._volume_sum += state.volume[0].item()
+        self._call_count += 1
+
+        if self._count == self.window_size:
+            # Re-order buffer into chronological order
+            if self._pos == 0:
+                series = self._buffer.clone()
+            else:
+                series = torch.cat([self._buffer[self._pos:], self._buffer[: self._pos]])
+
+            # FFT autocorrelation averaged over the 3 shear components
+            n = self.window_size
+            pacf = torch.zeros(n, device=self.device, dtype=torch.float64)
+            for k in range(3):
+                x = series[:, k]
+                f = torch.fft.rfft(x, n=2 * n)
+                acf_k = torch.fft.irfft(f * f.conj(), n=2 * n)[:n].real / n
+                pacf += acf_k
+            pacf /= 3.0
+
+            self._window_count += 1
+            if self.use_running_average:
+                self._avg += (pacf - self._avg) / self._window_count
+            else:
+                self._avg = pacf
+
+            # Reset for next window
+            self._buffer.zero_()
+            self._pos = 0
+            self._count = 0
+
+        return torch.tensor([self._window_count], device=state.device)
+
+    @property
+    def pacf(self) -> torch.Tensor:
+        """Current PACF in (eV/Å³)²."""
+        return self._avg
+
+    def viscosity(self, timestep_ps: float) -> float:
+        """Integrate the PACF to give shear viscosity.
+
+        Uses the Green-Kubo relation with trapezoidal integration:
+
+            η = (V / kT) ∫ < P_αβ(0) P_αβ(t) > dt
+
+        Args:
+            timestep_ps: MD timestep in picoseconds.
+
+        Returns:
+            Shear viscosity in Pa·s.
+        """
+        avg_vol_ang3 = self._volume_sum / max(self._call_count, 1)
+        V_m3 = avg_vol_ang3 * 1e-30
+        kT_J = 1.380649e-23 * self.temperature
+        dt_s = timestep_ps * 1e-12
+        # 1 eV/Å³ = 1.60218e-19 J / 1e-30 m³ = 1.60218e11 Pa
+        eV_ang3_to_Pa = 1.60218e-19 / 1e-30
+        pacf_Pa2 = self.pacf.cpu().numpy() * eV_ang3_to_Pa**2
+        return float((V_m3 / kT_J) * np.trapz(pacf_Pa2, dx=dt_s))
