@@ -53,61 +53,115 @@ def perform_velocity_exchange_step(system_state: MDState, n_exchanges: int,
     Note: Instead of defining the system as in the paper, we define:
           hot slab at slab_0 and cold slab at slab_N
 
+    Multi-species swap rule: candidates are ranked by per-atom KINETIC ENERGY
+    (0.5*m*|v|^2), not raw speed, since a heavier atom moving slowly can carry more energy
+    than a light atom moving fast. Each hottest slab_N atom is matched to the coldest
+    slab_0 atom OF THE SAME ATOMIC SPECIES (so the swapped pair has identical mass,
+    exactly as in Muller-Plathe's original same-mass swap). This guarantees every swap
+    exactly conserves both momentum and kinetic energy of the pair, which is required for
+    the method's steady-state heat-flux bookkeeping to be valid — swapping full velocity
+    vectors between UNEQUAL masses (naive multi-species swap) would not conserve momentum.
+    If a hottest candidate in slab_N has no same-species partner left in slab_0, it is
+    skipped and the next-hottest candidate is tried; if fewer than n_exchanges
+    species-matched pairs can be found this step (rare — only possible for very dilute
+    species in a small system), the remaining slots are recorded as zero-flux
+    (no swap performed) and a warning is logged, rather than silently swapping mismatched
+    masses.
+
     Steps For Velocity Exchange Step:
-        1. Find 'n_exchanges' number of coldest atom in slab_1
-        2. Find 'n_exchanges' number of hottest atom in slab_N
-        ----------- For each exchange -----------
-        3. Find the particles in system_state
-        4. Update the system_state by Swapping particle velocity and momenta around
+        1. Rank slab_N atoms by kinetic energy, hottest first.
+        2. For each, find the coldest same-species atom in slab_0 not yet used.
+        ----------- For each matched pair -----------
+        3. Swap velocity (and momentum) vectors between the matched pair.
         Note: # We don't modify the Positions, Forces, Masses, (Potential) Energy
         -----------------------------------------
-        5. Return the updated system_state
+        4. Return the updated system_state
     """
     # Calculate slab_idx, slabwise_velocity
     device = system_state.device
     slabwise_velocities, slabwise_masses, slab_idx = classify_particle_slab(system_state, lower.to(device), upper.to(device))
+    n_slabs = len(slabwise_velocities)
 
-    # Slabwise_velocities and slab_idx can be calculated from system_state, lower and upper
-    # Step 1: Find 'n_exchanges' coldest atom(s) in Slab_0
-    slab_0_velocities = slabwise_velocities[0]
-    slab_0_speed = torch.linalg.norm(slab_0_velocities, dim=1, ord = 2)
-    negative_slab_0_speed = -1 * slab_0_speed
-    min_values, min_values_idx = torch.topk(negative_slab_0_speed, n_exchanges, dim=-1)
-    min_values, min_values_idx = torch.abs(min_values).tolist(), min_values_idx.tolist() # Convert abs(tensor) to list
+    atomic_numbers = system_state.atomic_numbers.to(device)
+    masses = system_state.masses.to(device)
+    velocities = system_state.velocities
 
-    # Step 2: Find 'n_exchanges' hottest atom in Slab_N
-    slab_n = slabwise_velocities[-1]
-    slab_n_speed = torch.linalg.norm(slab_n, dim=1, ord = 2)
-    max_values, max_values_idx = torch.topk(slab_n_speed, n_exchanges, dim=-1)
-    max_values, max_values_idx = max_values.tolist(), max_values_idx.tolist() # Convert tensor to list
+    slab0_global_idx = (slab_idx == 0).nonzero(as_tuple=True)[0]
+    slabN_global_idx = (slab_idx == (n_slabs - 1)).nonzero(as_tuple=True)[0]
 
-    # Generate the v_hot_values and v_cold_values list:
-    v_hot_values: list = max_values                                  # Note: this is |v| and not \vec{v}
-    v_cold_values: list = min_values                                 # Note: this is |v| and not \vec{v}
+    slab0_species = atomic_numbers[slab0_global_idx]
+    slabN_species = atomic_numbers[slabN_global_idx]
 
-    # Save the v_hot_values and v_cold_values to the "intmd_vexchange_data.h5" inside data_folder_path_abs:
-    RNEMD.append_to_intmd_file(v_hot_values, v_cold_values, filepath=filepath)
+    slab0_ke = 0.5 * masses[slab0_global_idx] * torch.sum(velocities[slab0_global_idx] ** 2, dim=1)
+    slabN_ke = 0.5 * masses[slabN_global_idx] * torch.sum(velocities[slabN_global_idx] ** 2, dim=1)
 
-    for ith_exchange in range(n_exchanges):
-        min_value_idx = min_values_idx[ith_exchange]
-        max_value_idx = max_values_idx[ith_exchange]
+    # Step 1: rank slab_N candidates hottest-first
+    slabN_order = torch.argsort(slabN_ke, descending=True).tolist()
+    slab0_used = torch.zeros(slab0_global_idx.shape[0], dtype=torch.bool, device=device)
 
-        # Step 3: Finding the particle in the system_state
-        idx_coldest_atom = find_particle(slab_idx, 0, min_value_idx)
-        idx_hottest_atom = find_particle(slab_idx, (len(slabwise_velocities)-1), max_value_idx)
+    v_hot_values, v_cold_values, m_hot_values, m_cold_values = [], [], [], []
+    n_matched = 0
 
-        # Step 4: Swap the velocity and momenta to Update the system_state (for coldest_atom and hottest_atom)
-        # Swapping Velocities:
-        hot_slab_particle_velocity, cold_slab_particle_velocity = system_state.velocities[idx_hottest_atom,:].detach(), system_state.velocities[idx_coldest_atom,:].detach()
-        system_state.velocities[idx_coldest_atom,:] = hot_slab_particle_velocity
-        system_state.velocities[idx_hottest_atom,:] = cold_slab_particle_velocity
+    for candidate_local_idx in slabN_order:
+        if n_matched >= n_exchanges:
+            break
+        z_hot = slabN_species[candidate_local_idx]
 
-        # Swapping Momenta:
-        hot_slab_particle_momenta, cold_slab_particle_momenta = system_state.momenta[idx_hottest_atom,:].detach(), system_state.momenta[idx_coldest_atom,:].detach()
-        system_state.momenta[idx_coldest_atom,:] = hot_slab_particle_momenta
-        system_state.momenta[idx_hottest_atom,:] = cold_slab_particle_momenta
+        # Step 2: coldest available slab_0 atom of the same species
+        same_species_available = (slab0_species == z_hot) & (~slab0_used)
+        if not torch.any(same_species_available):
+            logger.debug(
+                f"No unmatched slab_0 atom of species Z={int(z_hot)} available for the "
+                f"current hottest slab_N candidate; trying the next-hottest candidate."
+            )
+            continue
+        candidate_ke = slab0_ke.masked_fill(~same_species_available, float("inf"))
+        cold_local_idx = int(torch.argmin(candidate_ke))
+        slab0_used[cold_local_idx] = True
 
-    # Step 5: Return the updated system_state
+        idx_hottest_atom = int(slabN_global_idx[candidate_local_idx])
+        idx_coldest_atom = int(slab0_global_idx[cold_local_idx])
+
+        # Step 3: swap velocity and momentum vectors (masses match exactly, so this swap
+        # conserves both momentum and kinetic energy of the pair, same as the original
+        # single-species method).
+        hot_slab_particle_velocity, cold_slab_particle_velocity = (
+            system_state.velocities[idx_hottest_atom, :].detach().clone(),
+            system_state.velocities[idx_coldest_atom, :].detach().clone(),
+        )
+        system_state.velocities[idx_coldest_atom, :] = hot_slab_particle_velocity
+        system_state.velocities[idx_hottest_atom, :] = cold_slab_particle_velocity
+
+        hot_slab_particle_momenta, cold_slab_particle_momenta = (
+            system_state.momenta[idx_hottest_atom, :].detach().clone(),
+            system_state.momenta[idx_coldest_atom, :].detach().clone(),
+        )
+        system_state.momenta[idx_coldest_atom, :] = hot_slab_particle_momenta
+        system_state.momenta[idx_hottest_atom, :] = cold_slab_particle_momenta
+
+        mass_shared = masses[idx_hottest_atom].item()
+        v_hot_values.append(torch.linalg.norm(hot_slab_particle_velocity).item())
+        v_cold_values.append(torch.linalg.norm(cold_slab_particle_velocity).item())
+        m_hot_values.append(mass_shared)
+        m_cold_values.append(mass_shared)
+        n_matched += 1
+
+    if n_matched < n_exchanges:
+        logger.warning(
+            f"Only matched {n_matched}/{n_exchanges} species-matched exchange pairs this "
+            f"step; the remaining {n_exchanges - n_matched} slot(s) are recorded as "
+            f"zero-flux (no swap performed) rather than swapping mismatched masses."
+        )
+        pad = n_exchanges - n_matched
+        v_hot_values += [0.0] * pad
+        v_cold_values += [0.0] * pad
+        m_hot_values += [0.0] * pad
+        m_cold_values += [0.0] * pad
+
+    # Save the vexchange data to the "intmd_vexchange_data.h5" inside data_folder_path_abs:
+    RNEMD.append_to_intmd_file(v_hot_values, v_cold_values, m_hot_values, m_cold_values, filepath=filepath)
+
+    # Step 4: Return the updated system_state
     return system_state
 
 
@@ -277,20 +331,27 @@ class RNEMD(ImplementationBase, DataSetIO):
         Initialize RNEMD object from an existing SimState
         To initialize it based on a set of construction parameters (nslabs, n_atoms, atomic_number, box_dimensions_angs, device, dtype & pbc) use RNEMD.create_simple_system().
 
+        Multi-species support: SimState may contain more than one atomic species. Velocity
+        exchanges (see perform_velocity_exchange_step) are matched by species (same atomic
+        number swapped in both slabs), so each swap exactly conserves momentum and kinetic
+        energy of the swapped pair, generalizing Muller-Plathe's original same-mass swap
+        without weakening that guarantee. Per-atom mass/species are tracked instead of the
+        single scalar atomic_number/atomic_mass_amu used by the old single-species-only version.
+
         Raises
-            NotImplementedError: if SimState contains multiple systems or multiple atomic species.
+            NotImplementedError: if SimState contains multiple systems.
             ValueError:  if slabs isn't > zero
 
         Side effects
-            Sets attributes: system_state, n_atoms, atomic_number, atomic_mass_amu, simulation_device, dtype, nslabs, box dimensions (x,y,z).
+            Sets attributes: system_state, n_atoms, atomic_numbers, atomic_masses_amu,
+            simulation_device, dtype, nslabs, box dimensions (x,y,z). For backward
+            compatibility, atomic_number/atomic_mass_amu are also set when the system is
+            single-species (None otherwise).
             Calls _generate_system_slabs() to partition the box.
         """
         # Check for single system
         if system_state.n_systems > 1:
             raise NotImplementedError("For the current implementation: SimState must contain a single system. Multiple systems detected.")
-        # Check for system with multiple elements
-        if torch.unique(system_state.atomic_numbers).shape[0] > 1:
-            raise NotImplementedError("For the current implementation: SimState must contain a single type of atom. Multiple atomic species detected")
         # Ensure that the nSlab is even:
         if nslabs <= 0:
             raise ValueError("Number of slabs must be greater than zero.")
@@ -299,8 +360,18 @@ class RNEMD(ImplementationBase, DataSetIO):
         # Initialize the simulation variables
         self.system_state = system_state
         self.n_atoms = system_state.n_atoms
-        self.atomic_number = system_state.atomic_numbers[0].item()
-        self.atomic_mass_amu = ase.data.atomic_masses[self.atomic_number]
+        # Per-atom species/mass (amu) — the source of truth for multi-species systems.
+        self.atomic_numbers = system_state.atomic_numbers.clone()
+        self.atomic_masses_amu = system_state.masses.clone()
+        # Kept for backward compatibility with single-species callers/tutorials; None otherwise
+        # so any leftover single-species-only code path fails loudly instead of silently using
+        # the wrong (first-atom) mass on a multi-species system.
+        if torch.unique(self.atomic_numbers).shape[0] == 1:
+            self.atomic_number = system_state.atomic_numbers[0].item()
+            self.atomic_mass_amu = ase.data.atomic_masses[self.atomic_number]
+        else:
+            self.atomic_number = None
+            self.atomic_mass_amu = None
         if not torch.all(system_state.cell * (1 - torch.eye(system_state.cell.size(0), device=system_state.cell.device)) == 0):
             # Cell isn't diagonalized (the system_state has not conventional setup for the simulation_box)
             raise ValueError("SimState.cell must be a diagonal matrix")
@@ -480,7 +551,7 @@ class RNEMD(ImplementationBase, DataSetIO):
             directory = os.getcwd() # Get the current working directory (from which RNEMD is being called)
             self.data_folder_path_abs = os.path.join(directory, 'RNEMD_simulation_data')
         else:
-            os.makedirs(data_folder_path_abs, exist_ok=True)
+            self.data_folder_path_abs = data_folder_path_abs
         os.makedirs(self.data_folder_path_abs, exist_ok=True)
 
         if log_to_file:
@@ -571,11 +642,20 @@ class RNEMD(ImplementationBase, DataSetIO):
         simulation_file = self.simulation_parameters['simulation_filepath']
         self.simulation_file = simulation_file
 
-        # Get the vexchange data from the intmd file:
-        v_hot_list, v_cold_list = self.intmd_file_read_all_data(intmd_file)
-        sqred_v_hot_list, sqrd_v_cold_list = torch.pow(torch.tensor(v_hot_list), 2), torch.pow(torch.tensor(v_cold_list), 2)
-        vhot_cumulative_list = self._formulate_cumulative_prop(torch.tensor(v_hot_list)) # Generates a running vhot_list at each step
-        vcold_cumulative_list = self._formulate_cumulative_prop(torch.tensor(v_cold_list)) # Generates a running vcold_list at each step
+        # Get the vexchange data from the intmd file. m_hot_list/m_cold_list hold the per-exchange
+        # atomic mass (amu) of the swapped pair — required for a multi-species system, which has
+        # no single global atomic_mass_amu (see RNEMD.__init__ and perform_velocity_exchange_step).
+        v_hot_list, v_cold_list, m_hot_list, m_cold_list = self.intmd_file_read_all_data(intmd_file)
+        v_hot_t, v_cold_t = torch.tensor(v_hot_list), torch.tensor(v_cold_list)
+        m_hot_t, m_cold_t = torch.tensor(m_hot_list), torch.tensor(m_cold_list)
+
+        # Per-exchange kinetic energy transferred across the hot/cold slab boundary (eV),
+        # mass-aware per exchange rather than a single global mass. Species-matched swaps (see
+        # perform_velocity_exchange_step) make m_hot_t == m_cold_t elementwise except on padded
+        # zero-flux slots (both zero), so this reduces to the original single-species formula
+        # exactly when the system has only one species.
+        energy_transfer = 0.5 * m_hot_t * torch.pow(v_hot_t, 2) - 0.5 * m_cold_t * torch.pow(v_cold_t, 2)
+        energy_transfer_cumulative_list = self._formulate_cumulative_prop(energy_transfer) # Generates a running energy-transfer list at each step
 
         # Get the slabwise_temperature from the simulation_file and then convert it to torch.Tensor
         # slabwise_temperature:  (n_exchange_step, nslabs)
@@ -594,13 +674,13 @@ class RNEMD(ImplementationBase, DataSetIO):
 
         # Determine Final Thermal Conductivity
         # Formula used: - numerator/denominator
-        # numerator = (0.5 * atomic_mass_amu * (np.sum(vhot_squared) - np.sum(vcold_squared)) * eV_to_J)
+        # numerator = (sum(energy_transfer) * eV_to_J), energy_transfer already mass-aware per exchange
         # denominator = (L_x_in_m * L_y_in_m * avg_dTdz * time_elapsed * n_exchanges_per_step)
         L_x_in_m = self.x * Angs_to_m
         L_y_in_m = self.y * Angs_to_m
         total_time_elapsed = self.simulation_parameters['timestep_ps'] * self.simulation_parameters['nsteps_total'] * ps_to_s
         n_exchanges_per_step = self.simulation_parameters['n_exchanges_per_step']
-        numerator = 0.5 * self.atomic_mass_amu * (torch.sum(sqred_v_hot_list) - torch.sum(sqrd_v_cold_list)) * eV_to_J
+        numerator = torch.sum(energy_transfer) * eV_to_J
         denominator = L_x_in_m * L_y_in_m * avg_dTdz * total_time_elapsed * n_exchanges_per_step
         final_thermal_conductivity = numerator/denominator
 
@@ -610,8 +690,8 @@ class RNEMD(ImplementationBase, DataSetIO):
             # Initialize and preallocate arrays for running values:
             #----------------------------------------------------------
             # For running energy transfer term: (vexchange)
-            running_vhot_squared, running_vcold_squared = [None] * self.total_exchange_steps, [None] * self.total_exchange_steps
-            running_sum_vhot_squared, running_sum_vcold_squared = [None] * self.total_exchange_steps, [None] * self.total_exchange_steps
+            running_energy_transfer = [None] * self.total_exchange_steps
+            running_sum_energy_transfer = [None] * self.total_exchange_steps
 
             # For running temperature gradient values:
             running_dTdz_over_time = dTdz_over_time.detach()
@@ -629,18 +709,11 @@ class RNEMD(ImplementationBase, DataSetIO):
                 simulation_step = (steps+1) * self.simulation_parameters['W'] # step+1 since steps starts from zero
                 time_elapsed = self.simulation_parameters['timestep_ps'] * simulation_step * ps_to_s
 
-                # Calculate energy transfer (vexchange) term by processing vhot_cumulative_list and vcold_cumulative_list:
-                vhot_squared = torch.pow(vhot_cumulative_list[steps], 2)
-                vcold_squared = torch.pow(vcold_cumulative_list[steps], 2)
-
-                running_vhot_squared[steps] = vhot_squared
-                running_vcold_squared[steps] = vcold_squared
-
-                cumulative_sum_vhot_squared = torch.sum(vhot_squared)
-                cumulative_sum_vcold_squared = torch.sum(vcold_squared)
-
-                running_sum_vhot_squared[steps] = cumulative_sum_vhot_squared
-                running_sum_vcold_squared[steps] = cumulative_sum_vcold_squared
+                # Calculate cumulative energy transfer (vexchange) term from energy_transfer_cumulative_list
+                # (already mass-aware per exchange — see energy_transfer above):
+                running_energy_transfer[steps] = energy_transfer_cumulative_list[steps]
+                cumulative_sum_energy_transfer = torch.sum(energy_transfer_cumulative_list[steps])
+                running_sum_energy_transfer[steps] = cumulative_sum_energy_transfer
 
                 # Calculate running temperature_gradient values
                 cumulative_dTdz_z = running_dTdz_over_time[:steps]
@@ -650,9 +723,9 @@ class RNEMD(ImplementationBase, DataSetIO):
 
                 # Calculate running thermal conductivity using running time averaged temp grad
                 # running_thermal_conductivity = - numerator/denominator
-                # numerator = (0.5* atomic_mass_amu * (sum(vhot_squared) - sum(vcold_squared)) * eV_to_J)
+                # numerator = (cumulative_sum_energy_transfer * eV_to_J)
                 # denominator = (L_x_in_m * L_y_in_m * avg_dTdz * time_elapsed * n_exchanges_per_step)
-                numerator = 0.5* self.atomic_mass_amu * (cumulative_sum_vhot_squared - cumulative_sum_vcold_squared) * eV_to_J
+                numerator = cumulative_sum_energy_transfer * eV_to_J
                 denominator = L_x_in_m * L_y_in_m * ith_avg_dTdz * time_elapsed * n_exchanges_per_step
                 ith_thermal_conductivity = - numerator / denominator
                 running_thermal_conductivity[steps] = ith_thermal_conductivity.item()
@@ -663,8 +736,9 @@ class RNEMD(ImplementationBase, DataSetIO):
             # Store cumulative vexchange info and vexchange info in the simulation file
             self.simulation_file_store_property(simulation_file, 'v_hot_list', v_hot_list, len(simulation_exchange_steps))
             self.simulation_file_store_property(simulation_file, 'v_cold_list', v_cold_list, len(simulation_exchange_steps))
-            self.simulation_file_store_property(simulation_file, 'v_hot_cumulative', vhot_cumulative_list, len(simulation_exchange_steps))
-            self.simulation_file_store_property(simulation_file, 'v_cold_cumulative', vcold_cumulative_list, len(simulation_exchange_steps))
+            self.simulation_file_store_property(simulation_file, 'm_hot_list', m_hot_list, len(simulation_exchange_steps))
+            self.simulation_file_store_property(simulation_file, 'm_cold_list', m_cold_list, len(simulation_exchange_steps))
+            self.simulation_file_store_property(simulation_file, 'energy_transfer_cumulative', energy_transfer_cumulative_list, len(simulation_exchange_steps))
             # optional: Remove/delete the intmd file
             logger.info(f"Deleting the intermediate file: {intmd_file}")
             os.remove(intmd_file)
@@ -678,11 +752,9 @@ class RNEMD(ImplementationBase, DataSetIO):
             self.simulation_file_store_property(simulation_file, 'final_thermal_conductivity', final_thermal_conductivity, self.simulation_parameters['nsteps_total'])
             if compute_running_values:
                 logger.info(f"Storing running values in {simulation_file}")
-                # Store running_vhot_squared, cumulative_sum_vhot_squared ... etc.
-                self.simulation_file_store_property(simulation_file, 'running_vhot_squared', running_vhot_squared, simulation_exchange_steps)
-                self.simulation_file_store_property(simulation_file, 'running_vcold_squared',running_vcold_squared, simulation_exchange_steps)
-                self.simulation_file_store_property(simulation_file, 'running_sum_vhot_squared', running_sum_vhot_squared, simulation_exchange_steps)
-                self.simulation_file_store_property(simulation_file, 'running_sum_vcold_squared', running_sum_vcold_squared, simulation_exchange_steps)
+                # Store running_energy_transfer, running_sum_energy_transfer ... etc.
+                self.simulation_file_store_property(simulation_file, 'running_energy_transfer', running_energy_transfer, simulation_exchange_steps)
+                self.simulation_file_store_property(simulation_file, 'running_sum_energy_transfer', running_sum_energy_transfer, simulation_exchange_steps)
                 # Store running_dTdz_over_time, running_dTdz_mean_z and running_avg_dTdz in simulation file
                 self.simulation_file_store_property(simulation_file, 'running_dTdz_over_time', running_dTdz_over_time, simulation_exchange_steps)
                 self.simulation_file_store_property(simulation_file, 'running_dTdz_mean_z', running_dTdz_mean_z, simulation_exchange_steps)
@@ -756,11 +828,12 @@ class RNEMD(ImplementationBase, DataSetIO):
         filepath (PathLike):  Path to the trajectory file to open with ts.TorchSimTrajectory.
         property_name (str): Name of the property to retrieve. Must be one of the acceptable property names:
             - Properties recorded during simulation: "system_temperature", "system_potential", "slabwise_temperature"
-            - Post-simulation processing: "v_hot_list", "v_cold_list", "v_hot_cumulative", "v_cold_cumulative",
-            "dTdz_over_time", "dTdz_mean_z", "avg_dTdz", "final_thermal_conductivity"
-            - Running statistics: "running_vhot_squared", "running_vcold_squared", "running_sum_vhot_squared",
-            "running_sum_vcold_squared", "running_dTdz_over_time", "running_dTdz_mean_z",
-            "running_avg_dTdz", "running_thermal_conductivity"
+            - Post-simulation processing: "v_hot_list", "v_cold_list", "m_hot_list", "m_cold_list",
+            "energy_transfer_cumulative", "dTdz_over_time", "dTdz_mean_z", "avg_dTdz",
+            "final_thermal_conductivity"
+            - Running statistics: "running_energy_transfer", "running_sum_energy_transfer",
+            "running_dTdz_over_time", "running_dTdz_mean_z", "running_avg_dTdz",
+            "running_thermal_conductivity"
 
         Returns:
         numpy.ndarray: The array for the requested property as returned by traj.get_array(property_name).
@@ -773,12 +846,12 @@ class RNEMD(ImplementationBase, DataSetIO):
         # Check if the name exists in the acceptable_property_names
         acceptable_property_names = [
             # Properties Recorded During Simulation
-            "system_temperature","system_potential" "slabwise_temperature"
+            "system_temperature", "system_potential", "slabwise_temperature",
             # Post-Simulation Processing
-            'v_hot_list', 'v_cold_list', 'v_hot_cumulative', 'v_cold_cumulative','dTdz_over_time', 'dTdz_mean_z',
-            'avg_dTdz', 'final_thermal_conductivity',
+            'v_hot_list', 'v_cold_list', 'm_hot_list', 'm_cold_list', 'energy_transfer_cumulative',
+            'dTdz_over_time', 'dTdz_mean_z', 'avg_dTdz', 'final_thermal_conductivity',
             # Running Statistics
-            'running_vhot_squared', 'running_vcold_squared', 'running_sum_vhot_squared', 'running_sum_vcold_squared',
+            'running_energy_transfer', 'running_sum_energy_transfer',
             'running_dTdz_over_time', 'running_dTdz_mean_z', 'running_avg_dTdz', 'running_thermal_conductivity']
         if str(property_name) not in acceptable_property_names:
             logger.error(f"Unable to find {property_name} property in acceptable_property_names")
@@ -887,22 +960,32 @@ class RNEMD(ImplementationBase, DataSetIO):
     #                       Functions to initialise, append and read data in intmd_file
     # ------------------------------------------------------------------------------------------------------------- #
     @staticmethod
-    def intmd_file_read_all_data(filepath: PathLike="intmd_vexchange_data.h5", vhot: str= "vhot", vcold: str= "vcold"):
+    def intmd_file_read_all_data(filepath: PathLike="intmd_vexchange_data.h5", vhot: str= "vhot", vcold: str= "vcold",
+                                  mhot: str = "mhot", mcold: str = "mcold"):
         """
-        Read and return all data stored in the intermediate file i.e v_hot_list and v_cold_list
-        (velocity exchange) information
+        Read and return all data stored in the intermediate file i.e v_hot_list, v_cold_list,
+        m_hot_list and m_cold_list (velocity exchange) information.
+
+        m_hot_list/m_cold_list hold the per-exchange atomic mass (amu) of the swapped pair —
+        required (not just v_hot/v_cold) once the system has more than one species, since the
+        heat-flux formula in post_simulation_processing is now per-exchange mass-aware instead
+        of using one global atomic_mass_amu (see RNEMD.__init__).
 
         Parameters:
             filepath (PathLike): path to the HDF5 file.
             vhot (str): dataset name for hot values (default: 'vhot')
             vcold (str): dataset name for cold values (default: 'vcold')
+            mhot (str): dataset name for the hot atom's mass, amu (default: 'mhot')
+            mcold (str): dataset name for the cold atom's mass, amu (default: 'mcold')
         """
         with h5py.File(filepath, "r") as f:
             grp = f['data']
             vhot_values = grp[vhot][:]
             vcold_values = grp[vcold][:]
+            mhot_values = grp[mhot][:]
+            mcold_values = grp[mcold][:]
 
-        return vhot_values, vcold_values # Both are (n_exchange_steps, n_exchange_per_step)
+        return vhot_values, vcold_values, mhot_values, mcold_values # All are (n_exchange_steps, n_exchange_per_step)
 
     @staticmethod
     def initialise_intmd_file(
@@ -911,6 +994,8 @@ class RNEMD(ImplementationBase, DataSetIO):
             n_items_in_list: int,
             vhot_ds="vhot",
             vcold_ds="vcold",
+            mhot_ds="mhot",
+            mcold_ds="mcold",
             dtype=np.float32,
             mode: str = 'a',
             compression: Optional[str] = None) -> None:
@@ -922,16 +1007,20 @@ class RNEMD(ImplementationBase, DataSetIO):
             n_items_in_list (int): number of items per row (second dimension).
             vhot_ds (str): dataset name for hot values (default 'vhot').
             vcold_ds (str): dataset name for cold values (default 'vcold').
+            mhot_ds (str): dataset name for the hot atom's mass, amu (default 'mhot').
+            mcold_ds (str): dataset name for the cold atom's mass, amu (default 'mcold').
             dtype: NumPy dtype for storage (default np.float32).
             mode (str): file open mode passed to h5py.File (default 'a').
             compression (Optional[str]): compression filter name (e.g., 'gzip') or None.
 
         Behavior:
             Ensures the group '/data' exists in the HDF5 file at filepath.
-            Ensures two datasets '/data/{vhot_ds}' and '/data/{vcold_ds}' exist with shape (n_store_calls, n_items_in_list) and dtype dtype.
+            Ensures four datasets '/data/{vhot_ds,vcold_ds,mhot_ds,mcold_ds}' exist with shape
+            (n_store_calls, n_items_in_list) and dtype dtype.
             If an existing dataset has a different shape or dtype, it is deleted and recreated.
             Newly created datasets receive a persistent attribute 'write_idx' initialized to 0.
         """
+        ds_names = (vhot_ds, vcold_ds, mhot_ds, mcold_ds)
         with h5py.File(filepath, mode) as f:
             # Creates a dataset group called 'data'
             grp = f.require_group('data')
@@ -940,45 +1029,44 @@ class RNEMD(ImplementationBase, DataSetIO):
                 old_dataset_vhot = grp[vhot_ds]
                 if old_dataset_vhot.shape != (n_store_calls, n_items_in_list) or old_dataset_vhot.dtype != dtype:
                     logger.warning(f"Found existing dataset with different shape {old_dataset_vhot.shape} and/or dtype {old_dataset_vhot.dtype}.\nDeleting the existing dataset and creating a new one with shape {(n_store_calls, n_items_in_list)} and dtype {dtype}.")
-                    # Due to the setup of both vcold and vhot data we know that vcold_ds is also not the same shape
-                    del grp[vhot_ds], grp[vcold_ds]
+                    # Due to the setup of vhot/vcold/mhot/mcold data we know all four are not the same shape
+                    for ds_name in ds_names:
+                        if ds_name in grp:
+                            del grp[ds_name]
 
-            # Creates a dataset called 'vhot_ds'
-            vhot_ds_obj = grp.require_dataset(vhot_ds,
-                                              shape=(n_store_calls, n_items_in_list),
-                                              dtype=dtype,
-                                              chunks= (1, n_items_in_list),
-                                              compression=compression,
-                                              fillvalue=0)
-            # Initialising 'write_idx' as a 'vhot_ds' dataset attribute
-            vhot_ds_obj.attrs['write_idx'] = 0
-            # Creates a dataset called 'vcold_ds'
-            vcold_ds_obj = grp.require_dataset(vcold_ds,
-                                               shape=(n_store_calls, n_items_in_list),
-                                               dtype=dtype,
-                                               chunks= (1, n_items_in_list),
-                                               compression=compression,
-                                               fillvalue=0)
-            # Initialising 'write_idx' as a 'vcold_ds' dataset attribute
-            vcold_ds_obj.attrs['write_idx'] = 0
+            for ds_name in ds_names:
+                ds_obj = grp.require_dataset(ds_name,
+                                             shape=(n_store_calls, n_items_in_list),
+                                             dtype=dtype,
+                                             chunks= (1, n_items_in_list),
+                                             compression=compression,
+                                             fillvalue=0)
+                # Initialising 'write_idx' as a dataset attribute
+                ds_obj.attrs['write_idx'] = 0
 
     @staticmethod
     def append_to_intmd_file(
             vhot_vals: Sequence,
             vcold_vals: Sequence,
+            mhot_vals: Sequence,
+            mcold_vals: Sequence,
             filepath: PathLike,
             vhot_ds: str = "vhot",
             vcold_ds: str = "vcold",
+            mhot_ds: str = "mhot",
+            mcold_ds: str = "mcold",
             dtype=np.float32,
             mode: str = "a",
-    ) -> Tuple[int, int]:
+    ) -> Tuple[int, int, int, int]:
         """
-        Append one row each to datasets '/data/{vhot_ds}' and '/data/{vcold_ds}' inside `filepath`.
+        Append one row each to datasets '/data/{vhot_ds,vcold_ds,mhot_ds,mcold_ds}' inside `filepath`.
 
         Parameters:
             vhot_vals, vcold_vals: 1-D sequences of length == n_items_in_list for their datasets.
+            mhot_vals, mcold_vals: 1-D sequences (same length) of the swapped pair's atomic
+                mass in amu — per-exchange, since a multi-species system has no single global mass.
             filepath: path to the HDF5 file.
-            vhot_ds, vcold_ds: names of the datasets inside the '/data' group.
+            vhot_ds, vcold_ds, mhot_ds, mcold_ds: names of the datasets inside the '/data' group.
             dtype: numpy dtype to coerce input rows (default np.float32).
             mode: file open mode (default 'a').
 
@@ -988,15 +1076,20 @@ class RNEMD(ImplementationBase, DataSetIO):
               validate input rows.
             Each dataset must contain an integer attribute 'write_idx' (defaults to 0
               if missing). The row is written at that index and 'write_idx' is incremented.
-            Returns the new write indices (after the append) as (vhot_new_idx, vcold_new_idx).
+            Returns the new write indices (after the append) as
+              (vhot_new_idx, vcold_new_idx, mhot_new_idx, mcold_new_idx).
 
         Logs the following error using Logger:
             KeyError: if a named dataset is missing under '/data'.
             ValueError: if input rows have incorrect shape.
             IndexError: if the target dataset is full.
         """
-        vhot_vals_arr = np.asarray(vhot_vals, dtype=dtype)
-        vcold_vals_arr = np.asarray(vcold_vals, dtype=dtype)
+        vals = {
+            vhot_ds: np.asarray(vhot_vals, dtype=dtype),
+            vcold_ds: np.asarray(vcold_vals, dtype=dtype),
+            mhot_ds: np.asarray(mhot_vals, dtype=dtype),
+            mcold_ds: np.asarray(mcold_vals, dtype=dtype),
+        }
 
         with h5py.File(filepath, mode) as f:
             grp = f.require_group('data')  # ensures /data exists
@@ -1005,23 +1098,21 @@ class RNEMD(ImplementationBase, DataSetIO):
                 if dataset is None:
                     logger.error(f"KeyError/Exception: Recieved an invalid dataset name, {ds_name}. Ensure you've initialized intmd_file appropriately.")
                 n_store_calls, n_items_in_list = dataset.shape
-                if vhot_vals_arr.shape != (n_items_in_list,) or vcold_vals_arr.shape != (n_items_in_list,):
-                    logger.error(f"ValueError: rows must have shape ({n_items_in_list},). Recieved rows with dimensions: vhot {vhot_vals_arr.shape} | vcold {vcold_vals_arr.shape}.)")
+                if vals[ds_name].shape != (n_items_in_list,):
+                    logger.error(f"ValueError: rows must have shape ({n_items_in_list},). Recieved row with dimensions: {ds_name} {vals[ds_name].shape}.)")
                 idx = int(dataset.attrs.get('write_idx', 0))
                 if idx >= n_store_calls:
                     logger.error(f"IndexError: Store full for dataset '/data/{ds_name}' (idx {idx} >= {n_store_calls}).")
                 return dataset, idx
 
-            vhot_dataset, vhot_write_idx = get_data_and_write_idx(vhot_ds)
-            vcold_dataset, vcold_write_idx = get_data_and_write_idx(vcold_ds)
+            new_indices = {}
+            for ds_name in (vhot_ds, vcold_ds, mhot_ds, mcold_ds):
+                dataset, write_idx = get_data_and_write_idx(ds_name)
+                dataset[write_idx, :] = vals[ds_name]
+                dataset.attrs['write_idx'] = write_idx + 1
+                new_indices[ds_name] = write_idx + 1
 
-            vhot_dataset[vhot_write_idx, :] = vhot_vals_arr
-            vhot_dataset.attrs['write_idx'] = vhot_write_idx + 1
-
-            vcold_dataset[vcold_write_idx, :] = vcold_vals_arr
-            vcold_dataset.attrs['write_idx'] = vcold_write_idx + 1
-
-        return vhot_write_idx + 1, vcold_write_idx + 1
+        return new_indices[vhot_ds], new_indices[vcold_ds], new_indices[mhot_ds], new_indices[mcold_ds]
 
     # ----------------------------------- End of intmd_file related Functions ------------------------------------- #
 
