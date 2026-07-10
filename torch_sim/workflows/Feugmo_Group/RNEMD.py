@@ -12,6 +12,8 @@ from torch_sim.models.interface import ModelInterface
 from torch_sim import fire_init, fire_step
 import torch_sim as ts
 
+from Feugmo_Group._misc import ImplementationBase, DataSetIO
+
 # --------------------------------------------------------------------
 # Reverse Non-Equilibrium Molecular Dynamics (RNEMD) based on Florian Muller-Plathe's Paper
 # Citation:
@@ -261,7 +263,7 @@ def perform_error_diagnosis(positions, z_coordinate, lower, upper, slab_idx) -> 
 
 # --------------------------------- End of Classify Particles Functions ------------------------------------------- #
 
-class RNEMD():
+class RNEMD(ImplementationBase, DataSetIO):
     """
     Driver for reverse non-equilibrium molecular dynamics (RNEMD) simulations.
     RNEMD(system_state=None, nslabs=20, n_atoms=None, atomic_number=None, box_dimensions_angs=None, device=None, dtype=None, pbc=None)
@@ -292,7 +294,8 @@ class RNEMD():
         # Ensure that the nSlab is even:
         if nslabs <= 0:
             raise ValueError("Number of slabs must be greater than zero.")
-
+        if nslabs % 2 !=0:
+            raise ValueError("Number of slabs must be even.")
         # Initialize the simulation variables
         self.system_state = system_state
         self.n_atoms = system_state.n_atoms
