@@ -4,8 +4,10 @@ import torch
 from nvalchemiops.torch.interactions.dispersion._dftd3 import D3Parameters, dftd3
 from nvalchemiops.neighbors import neighbor_list
 from nvalchemiops.torch.interactions.dispersion._dftd3 import D3Parameters
-# Import utilities from nvalchemi-toolkit-ops repo's utils.py (examples/dispersion/utils.py)
-from utils import (
+# Import utilities from nvalchemi-toolkit-ops repo's utils.py (examples/dispersion/utils.py).
+# That file is not vendored here due to possible license restrictions - download it from
+# the nvalchemi-toolkit-ops repo and place it at torch_sim/workflows/nonequilibrium_md/utils.py
+from .utils import (
     DFTD3,
     extract_dftd3_parameters,
     save_dftd3_parameters,
