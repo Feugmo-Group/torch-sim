@@ -105,7 +105,6 @@ class HNEMD(ImplementationBase, DataSetIO):
                 properties={"hac": self._compute_heat_current},
                 device=self.device,
                 normalize=True,
-                compute_cross_correlations=False
             )
             self.corr_calc[i] = corr_calc
 

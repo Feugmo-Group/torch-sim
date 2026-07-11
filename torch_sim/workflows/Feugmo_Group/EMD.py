@@ -131,7 +131,6 @@ class EMD(ImplementationBase, DataSetIO):
                 properties=props,
                 device=self.device,
                 normalize=True,
-                compute_cross_correlations=False
             )
             self.corr_calc[i] = corr_calc
 

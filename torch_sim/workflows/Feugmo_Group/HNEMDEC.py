@@ -126,8 +126,6 @@ class HNEMDEC(ImplementationBase, DataSetIO):
                 properties=corr_props,
                 device=self.device,
                 normalize=True,
-                compute_self_cross_correlations=True,
-                compute_auto_correlations=False,
             )
             self.corr_calc[i] = corr_calc
 
@@ -195,14 +193,23 @@ class HNEMDEC(ImplementationBase, DataSetIO):
         # Calculate the correlation using the ith calc (if n_components=0)
         calculator = self.corr_calc[self.corr_calc_count]
         calculator.update(state)
+        ac_dict = calculator.get_auto_correlations()
         cc_dict = calculator.get_cross_correlations()
         matrix_triu_entries, cc_count = torch.zeros(size=(self.ntriu_entries, 1), device=self.device, dtype=self.dtype), 0
 
-        if cc_dict:
-            for keys in cc_dict.keys():
-                # Retrive the lastest corr value for triu entries
-                matrix_triu_entries[cc_count] = cc_dict[keys][-1]
+        # Row-major upper-triangle order (including diagonal): for each name1, its
+        # diagonal (self) entry from ac_dict followed by its off-diagonal entries
+        # (name1, name2) with name2 later in property order, from cc_dict.
+        names = list(calculator.properties)
+        for i, name1 in enumerate(names):
+            if name1 in ac_dict:
+                matrix_triu_entries[cc_count] = ac_dict[name1][-1]
                 cc_count += 1
+            for name2 in names[i + 1:]:
+                key = (name1, name2)
+                if key in cc_dict:
+                    matrix_triu_entries[cc_count] = cc_dict[key][-1]
+                    cc_count += 1
 
 
         # Update the calc counter (system_state wise)
