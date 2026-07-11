@@ -158,7 +158,7 @@ def classify_particle_slab(system_state, lower, upper) -> tuple[list[torch.Tenso
     if lower.shape[0] == upper.shape[0]:
         n_slabs = lower.shape[0]
     else:
-        logger.error("Shape for Lower and Upper Tensor weren't the same: {} != {}".format(lower.shape, upper.shape))
+        raise ValueError("Shape for Lower and Upper Tensor weren't the same: {} != {}".format(lower.shape, upper.shape))
     z_coordinate = positions[:, 2:3] # Slicing the positions tensor
 
     # Vectorised range check (n_slabs, ndim, 1)
@@ -467,7 +467,7 @@ class RNEMD(ImplementationBase, DataSetIO):
         self.nsteps_total = nsteps_total
         # Check if nstep_total is divisible by W:
         if not nsteps_total % W ==0:
-            logger.error("ValueError: nsteps_total must be divisible by W")
+            raise ValueError("nsteps_total must be divisible by W")
         else:
             self.total_exchange_steps = nsteps_total//W
         # Override n_exchanges value if beyond a certain value
@@ -773,7 +773,7 @@ class RNEMD(ImplementationBase, DataSetIO):
         # Check if the name exists in the acceptable_property_names
         acceptable_property_names = [
             # Properties Recorded During Simulation
-            "system_temperature","system_potential" "slabwise_temperature"
+            "system_temperature", "system_potential", "slabwise_temperature",
             # Post-Simulation Processing
             'v_hot_list', 'v_cold_list', 'v_hot_cumulative', 'v_cold_cumulative','dTdz_over_time', 'dTdz_mean_z',
             'avg_dTdz', 'final_thermal_conductivity',
@@ -781,7 +781,7 @@ class RNEMD(ImplementationBase, DataSetIO):
             'running_vhot_squared', 'running_vcold_squared', 'running_sum_vhot_squared', 'running_sum_vcold_squared',
             'running_dTdz_over_time', 'running_dTdz_mean_z', 'running_avg_dTdz', 'running_thermal_conductivity']
         if str(property_name) not in acceptable_property_names:
-            logger.error(f"Unable to find {property_name} property in acceptable_property_names")
+            raise KeyError(f"Unable to find {property_name} property in acceptable_property_names")
         with ts.TorchSimTrajectory(filepath) as traj:
             system_simulation_prop = traj.get_array(property_name)
         return system_simulation_prop
@@ -1003,13 +1003,13 @@ class RNEMD(ImplementationBase, DataSetIO):
             def get_data_and_write_idx(ds_name):
                 dataset = grp.get(ds_name)
                 if dataset is None:
-                    logger.error(f"KeyError/Exception: Recieved an invalid dataset name, {ds_name}. Ensure you've initialized intmd_file appropriately.")
+                    raise KeyError(f"Recieved an invalid dataset name, {ds_name}. Ensure you've initialized intmd_file appropriately.")
                 n_store_calls, n_items_in_list = dataset.shape
                 if vhot_vals_arr.shape != (n_items_in_list,) or vcold_vals_arr.shape != (n_items_in_list,):
-                    logger.error(f"ValueError: rows must have shape ({n_items_in_list},). Recieved rows with dimensions: vhot {vhot_vals_arr.shape} | vcold {vcold_vals_arr.shape}.)")
+                    raise ValueError(f"rows must have shape ({n_items_in_list},). Recieved rows with dimensions: vhot {vhot_vals_arr.shape} | vcold {vcold_vals_arr.shape}.)")
                 idx = int(dataset.attrs.get('write_idx', 0))
                 if idx >= n_store_calls:
-                    logger.error(f"IndexError: Store full for dataset '/data/{ds_name}' (idx {idx} >= {n_store_calls}).")
+                    raise IndexError(f"Store full for dataset '/data/{ds_name}' (idx {idx} >= {n_store_calls}).")
                 return dataset, idx
 
             vhot_dataset, vhot_write_idx = get_data_and_write_idx(vhot_ds)
