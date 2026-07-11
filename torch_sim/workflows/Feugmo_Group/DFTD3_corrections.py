@@ -39,14 +39,14 @@ class DFTD3Corrections():
         if parameter_file is not None:
             self.dftd3_parameters = load_d3_parameters(parameter_file)
         else:
-            self.dftd3_parameters = self.load_param_file()
+            self.dftd3_parameters = self.load_parameters_from_file(parameter_file)
 
         # Maximum radius for calculation the dftd3 dispersion (in Angs)
         self.r_max = r_max 
-        self.a1=a1,  # BJ damping parameter
-        self.a2=a2,  # BJ damping radius
-        self.s6=s6,  # C6 term coefficient
-        self.s8=s8,  # C8 term coefficient
+        self.a1=a1  # BJ damping parameter
+        self.a2=a2  # BJ damping radius
+        self.s6=s6  # C6 term coefficient
+        self.s8=s8  # C8 term coefficient
 
     def load_parameters_from_file(self, parameter_file):
         # Code from Example Gallery
