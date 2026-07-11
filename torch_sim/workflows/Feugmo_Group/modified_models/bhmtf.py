@@ -34,6 +34,8 @@ Example::
     forces = output["forces"]
 """
 
+from typing import Callable
+
 import torch
 import torch_sim as ts
 from torch_sim import transforms
@@ -43,6 +45,7 @@ from torch_sim.neighbors import torchsim_nl
 from torch_sim.typing import StateDict
 
 e = 1.602_176_634e-19  # elementary charge (SI units)
+COULOMB_KE = 14.399645  # Coulomb prefactor 1/(4*pi*epsilon_0) in eV*Angstrom (metal units)
 DEFAULT_Rc = 7 # cutoff radius
 
 def calculate_external_force(energies, momenta, masses, virials, Fe_vec):
@@ -68,10 +71,9 @@ def per_atom_virial(dr_vec ,potential_details, positions, mapping, device, dtype
     if compute_coulombic_term:
         t_1 = torch.zeros_like(dr, requires_grad=False)
         # # Calculate t_1: coulombic interaction term
-        t_1[zero_pair_mask] = (e * ionic_charge_i)**2   / dr[zero_pair_mask]
-        t_1[one_pair_mask]  = e**2 * ionic_charge_i *ionic_charge_j / dr[one_pair_mask]
-        t_1[two_pair_mask]  = (e * ionic_charge_j)**2   / dr[two_pair_mask]
-        # t_1 = t_1 * J_to_eV      # convert back to eV
+        t_1[zero_pair_mask] = COULOMB_KE * ionic_charge_i * ionic_charge_i / dr[zero_pair_mask]
+        t_1[one_pair_mask]  = COULOMB_KE * ionic_charge_i * ionic_charge_j / dr[one_pair_mask]
+        t_1[two_pair_mask]  = COULOMB_KE * ionic_charge_j * ionic_charge_j / dr[two_pair_mask]
         t_1.requires_grad_(True)
 
     t_2, t_3, t_4 =torch.zeros_like(dr, requires_grad=False), torch.zeros_like(dr, requires_grad=False), torch.zeros_like(dr, requires_grad=False)
@@ -195,10 +197,9 @@ def fumi_tosi_pair(
     if compute_coulombic_term:
         t_1 = torch.zeros_like(dr, requires_grad=False)
         # # Calculate t_1: coulombic interaction term
-        t_1[zero_pair_mask] = (e * ionic_charge_i)**2   / dr[zero_pair_mask]
-        t_1[one_pair_mask]  = e**2 * ionic_charge_i *ionic_charge_j / dr[one_pair_mask]
-        t_1[two_pair_mask]  = (e * ionic_charge_j)**2   / dr[two_pair_mask]
-        # t_1 = t_1 * J_to_eV      # convert back to eV
+        t_1[zero_pair_mask] = COULOMB_KE * ionic_charge_i * ionic_charge_i / dr[zero_pair_mask]
+        t_1[one_pair_mask]  = COULOMB_KE * ionic_charge_i * ionic_charge_j / dr[one_pair_mask]
+        t_1[two_pair_mask]  = COULOMB_KE * ionic_charge_j * ionic_charge_j / dr[two_pair_mask]
         t_1.requires_grad_(True)
 
     t_2, t_3, t_4 =torch.zeros_like(dr, requires_grad=False), torch.zeros_like(dr, requires_grad=False), torch.zeros_like(dr, requires_grad=False)
@@ -513,7 +514,7 @@ class FumiTosiModel(ModelInterface):
         mask = distances < self.rc
         if self._compute_virials:
             potential_details = (pair_mask, self.ionic_charge_i, self.ionic_charge_j, self.sigma_ij, self.a, self.b, self.c, self.d, self.rc)
-            pair_energies, atom_energies, pair_forces, total_virial, atom_virial = per_atom_virial(dr_vec, potential_details, state.positions, mapping, self.device, self.dtype, self._compute_forces, self._compute_virials)
+            pair_energies, atom_energies, pair_forces, total_virial, atom_virial = per_atom_virial(dr_vec, potential_details, state.positions, mapping, self.device, self.dtype, self._compute_forces, self._compute_coulombic_term)
             results = {"energy": 0.5 * pair_energies.sum()}
             if self.per_atom_energies:
                 results['energies'] = atom_energies
@@ -528,7 +529,7 @@ class FumiTosiModel(ModelInterface):
                 dr=distances, pair_mask=pair_mask,
                 ionic_charge_i=self.ionic_charge_i, ionic_charge_j=self.ionic_charge_j,
                 sigma_ij=self.sigma_ij,
-                a=self.a, b=self.b, c=self.c, d=self.d, compute_coulombic_term=self.compute_coulombic_term,
+                a=self.a, b=self.b, c=self.c, d=self.d, compute_coulombic_term=self._compute_coulombic_term,
             )
 
             # Zero out energies beyond cutoff
@@ -571,7 +572,7 @@ class FumiTosiModel(ModelInterface):
                 # Compute stress tensor
                 stress_per_pair = torch.einsum("...i,...j->...ij", dr_vec, force_vectors)
                 volume = torch.abs(torch.linalg.det(cell))
-                results["stresses"] = -stress_per_pair.detach().sum(dim=0) / volume
+                results["stress"] = -stress_per_pair.detach().sum(dim=0) / volume
 
                 if self.per_atom_stresses:
                     atom_stresses = torch.zeros(
