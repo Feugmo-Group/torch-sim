@@ -482,7 +482,7 @@ class LennardJonesModel(ModelInterface):
                     atom_stresses.index_add_(0, mapping[1], -0.5 * stress_per_pair.float())
                     results["stresses"] = atom_stresses / volume
 
-        if self.compute_corrections:
+        if self.compute_correction:
             energy_correction, forces_correction, virial_correction = self.dftd3_corrections.compute_corrections(state_positions=wrapped_positions, state_cell=state.cell,
                                                                                                                  system_idx=state.system_idx, unit_shifts=shifts_idx,
                                                                                                                  state_atomic_numbers=state.atomic_numbers)
