@@ -29,7 +29,7 @@ import torch
 import torch_sim as ts
 from torch_sim.models.interface import ModelInterface
 from torch_sim.neighbors import torchsim_nl
-from Feugmo_Group.DFTD3_corrections import DFTD3Corrections
+from ..DFTD3_corrections import DFTD3Corrections
 
 try:
     from mace.cli.convert_e3nn_cueq import run as run_e3nn_to_cueq

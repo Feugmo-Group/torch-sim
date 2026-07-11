@@ -12,7 +12,7 @@ from torch_sim.models.interface import ModelInterface
 from torch_sim import fire_init, fire_step
 import torch_sim as ts
 
-from Feugmo_Group._misc import ImplementationBase, DataSetIO
+from ._misc import ImplementationBase, DataSetIO
 
 # --------------------------------------------------------------------
 # Reverse Non-Equilibrium Molecular Dynamics (RNEMD) based on Florian Muller-Plathe's Paper
