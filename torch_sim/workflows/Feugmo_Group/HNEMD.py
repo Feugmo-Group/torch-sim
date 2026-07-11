@@ -13,8 +13,8 @@ from torch_sim.integrators import MDState
 from torch_sim.models.interface import ModelInterface
 from torch_sim import fire_init, fire_step, gradient_descent_init, gradient_descent_step
 from torch_sim.autobatching import calculate_memory_scalers, estimate_max_memory_scaler
-from Feugmo_Group._misc import ImplementationBase, DataSetIO
-from Feugmo_Group.correlation import CorrelationCalculator
+from ._misc import ImplementationBase, DataSetIO
+from .correlation import CorrelationCalculator
 
 # ----------------------------------------------------------------------
 #            Physical constants (SI) & Unit Conversions Value

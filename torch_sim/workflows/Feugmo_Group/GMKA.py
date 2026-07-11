@@ -11,7 +11,7 @@ from torch_sim.integrators import MDState
 from torch_sim.models.interface import ModelInterface
 from torch_sim import fire_init, fire_step, gradient_descent_init, gradient_descent_step
 import torch_sim as ts
-from Feugmo_Group._misc import ImplementationBase, DataSetIO
+from ._misc import ImplementationBase, DataSetIO
 from typing import Literal
 
 # ----------------------------------------------------------------------

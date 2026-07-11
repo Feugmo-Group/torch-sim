@@ -31,7 +31,7 @@ from torch_sim import transforms
 from torch_sim.models.interface import ModelInterface
 from torch_sim.neighbors import torchsim_nl
 from torch_sim.typing import StateLike
-from Feugmo_Group.DFTD3_corrections import DFTD3Corrections
+from ..DFTD3_corrections import DFTD3Corrections
 
 DEFAULT_SIGMA = 1.0
 DEFAULT_EPSILON = 1.0
