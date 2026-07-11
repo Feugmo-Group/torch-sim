@@ -21,7 +21,8 @@ kB          = 1.380_649e-23                     # J·K⁻¹
 ps_to_s     = 1e-12                             # Convertion value: picoseconds to seconds
 eV_to_J     = 1.6021766208e-19                  # Convertion value: eV to Joules
 Angs_to_m   = 1e-10                             # Convertion value: Angstrom to meter
-amu_to_kg   = 1.660-27                          # Convertion value: amu to kilogram
+amu_to_kg   = 1.660e-27                         # Convertion value: amu to kilogram
+k_conversion = eV_to_J / (Angs_to_m * ps_to_s)  # Convertion value: k_md to k_si
 # ----------------------------------------------------------------------
 
 # --------------------------------------------------------------------
@@ -90,12 +91,10 @@ class GMKA(ImplementationBase, DataSetIO):
         self.sample_interval = sample_interval
         self.compute_thermal_conductivity = compute_thermal_conductivity
 
-        if self.nstep_total % sample_interval != 0:
+        if self.nsteps_total % sample_interval != 0:
             raise Exception("Sample interval doesn't equally divide the total number of steps")
-        if not (compute_viscosity or compute_diffusivity or compute_thermal_conductivity):
+        if not compute_thermal_conductivity:
             raise ValueError('Specify at-least one transport coefficient for computation')
-        if compute_heat_using_energy_dependence is not None and isinstance(compute_heat_using_energy_dependence, bool):
-            self.compute_heat_using_energy_dependence = compute_heat_using_energy_dependence
 
 
         # Perform the geometry optimization:
@@ -153,7 +152,7 @@ class GMKA(ImplementationBase, DataSetIO):
                 int_term = torch.cumulative_trapezoid(hac, dx=(self.timestep_s * self.sample_interval), dim=0)
                 thermal_conductivity = factor * int_term * k_conversion
                 self.store_property(simulation_file, 'thermal_conductivity', thermal_conductivity, self.nsteps_total)
-                logger.info(f"Simulation {i} Results: K_μ: {torch.mean(rtc).item():.4f} (W/mk), K_σ: {torch.std(rtc).item():.4f} (W/mk)")
+                logger.info(f"Simulation {i} Results: K_μ: {torch.mean(thermal_conductivity).item():.4f} (W/mk), K_σ: {torch.std(thermal_conductivity).item():.4f} (W/mk)")
 
 
         # ------------------------------------------------------------------------------------------------------------- #
