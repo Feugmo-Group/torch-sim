@@ -261,8 +261,8 @@ class EMD(ImplementationBase, DataSetIO):
             self.calc_updator(state)
 
         # Retrieve the latest/current HAC value
-        if 'heat_current' in self.corr_calc[self.corr_calc_count].correlations:
-            hac = self.corr_calc[self.corr_calc_count].correlations['heat_current'][-1,:]
+        if 'heat_current' in self.corr_calc[self.corr_calc_count].get_auto_correlations():
+            hac = self.corr_calc[self.corr_calc_count].get_auto_correlations()['heat_current'][-1,:]
         else:
             # Return dummy value
             size = (3,) if not self.compute_heat_using_energy_dependence else (5,)
@@ -289,8 +289,8 @@ class EMD(ImplementationBase, DataSetIO):
             self.calc_updator(state)
 
         # Retrieve the latest/current PAC value
-        if 'pressure_tensor' in self.corr_calc[self.corr_calc_count].correlations:
-            pac = self.corr_calc[self.corr_calc_count].correlations['pressure_tensor'][-1,:]
+        if 'pressure_tensor' in self.corr_calc[self.corr_calc_count].get_auto_correlations():
+            pac = self.corr_calc[self.corr_calc_count].get_auto_correlations()['pressure_tensor'][-1,:]
         else:
             pac = torch.zeros(size=(3,), device=self.device, dtype=self.dtype)
 
@@ -302,9 +302,9 @@ class EMD(ImplementationBase, DataSetIO):
     def _retrieve_vac(self, state):
         # Don't need to update the calculator
 
-        if 'velocities' in self.corr_calc[self.corr_calc_count].correlations:
+        if 'velocities' in self.corr_calc[self.corr_calc_count].get_auto_correlations():
             # Based on Torch_Sim's VelocityAutoCorrelation code
-            vac = self.corr_calc[self.corr_calc_count].correlations['velocities']
+            vac = self.corr_calc[self.corr_calc_count].get_auto_correlations()['velocities']
             vacf = torch.mean(vac, dim=(1,2))
             self._window_count += 1
             factor = 1.0 / self._window_count

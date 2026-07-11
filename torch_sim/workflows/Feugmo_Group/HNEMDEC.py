@@ -177,7 +177,7 @@ class HNEMDEC(ImplementationBase, DataSetIO):
             # Calculating the thermal conductivity:
             inverse_matrix = torch.inverse(gamma_matrix)
             gamma_value_md = inverse_matrix[:,0,0] # MD_units
-            gamma_value_si = gamma_value_md * ((Angs_to_m * ps_to_s)/eV_to_J) # SI_units
+            gamma_value_si = gamma_value_md * (eV_to_J / (Angs_to_m * ps_to_s)) # SI_units
             thermal_conductivity = 1/(self.temp_K ** 2 * gamma_value_si)
             self.store_property(filepath=simulation_file,property_name='thermal_conductivity',property_dataset=thermal_conductivity, steps=self.nsteps_total)
             logger.info(f"""Simulation {simulation_index} Results: K_μ: {torch.mean(thermal_conductivity)} (W/mK), K_σ: {torch.std(thermal_conductivity)} (W/mK)""")
@@ -195,7 +195,7 @@ class HNEMDEC(ImplementationBase, DataSetIO):
         # Calculate the correlation using the ith calc (if n_components=0)
         calculator = self.corr_calc[self.corr_calc_count]
         calculator.update(state)
-        cc_dict = calculator.cross_correlations
+        cc_dict = calculator.get_cross_correlations()
         matrix_triu_entries, cc_count = torch.zeros(size=(self.ntriu_entries, 1), device=self.device, dtype=self.dtype), 0
 
         if cc_dict:

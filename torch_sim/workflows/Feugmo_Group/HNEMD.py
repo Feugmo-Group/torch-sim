@@ -170,9 +170,9 @@ class HNEMD(ImplementationBase, DataSetIO):
         calculator.update(state)
 
         # Retrieve the autocorrelation value if it exists or return dummy value
-        if 'hac' in self.corr_calc[self.corr_calc_count].correlations:
+        if 'hac' in self.corr_calc[self.corr_calc_count].get_auto_correlations():
             # Get the latest value
-            hac_value = self.corr_calc[self.corr_calc_count].correlations['hac'][-1, :]
+            hac_value = self.corr_calc[self.corr_calc_count].get_auto_correlations()['hac'][-1, :]
         else:
             # Return dummy value
             hac_value = torch.zeros(size=(3,), device=self.device, dtype=self.dtype)
