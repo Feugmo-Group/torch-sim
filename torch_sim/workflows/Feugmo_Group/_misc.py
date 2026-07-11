@@ -186,12 +186,12 @@ class ImplementationBase():
             Updates self.system_state with final MDState returned by the integrator.
         """
         logger.info("Performing Equilibration...")
-        basic_props = {1: {"system_temperature": ImplementationBase._calculate_system_temperature,
-                           "system_potential": ImplementationBase._calculate_system_potential}
-                       }
+        basic_props = {"system_temperature": ImplementationBase._calculate_system_temperature,
+                       "system_potential": ImplementationBase._calculate_system_potential}
         n_equil_step = method_instance.n_equilibration_steps
         store_equil_data = method_instance.store_equilibration_data
-        equi_prop_to_record = basic_props | ({} if not isinstance(method_instance.equilibration_quantities_functions, dict) else method_instance.equilibration_quantities_functions)
+        user_props = {} if not isinstance(method_instance.equilibration_quantities_functions, dict) else method_instance.equilibration_quantities_functions
+        equi_prop_to_record = {1: basic_props | user_props}
 
         if store_equil_data:
             equilibrium_file_reporter = ts.TrajectoryReporter(
