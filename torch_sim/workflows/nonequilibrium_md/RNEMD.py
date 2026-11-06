@@ -12,8 +12,8 @@ from torch_sim.models.interface import ModelInterface
 from torch_sim import fire_init, fire_step
 import torch_sim as ts
 
-from ._misc import ImplementationBase, DataSetIO
-
+from torch_sim.workflows.nonequilibrium_md._misc import ImplementationBase, DataSetIO
+from torch_sim.workflows.nonequilibrium_md._misc import * # Import all the conversion values from _misc
 # --------------------------------------------------------------------
 # Reverse Non-Equilibrium Molecular Dynamics (RNEMD) based on Florian Muller-Plathe's Paper
 # Citation:
@@ -21,18 +21,11 @@ from ._misc import ImplementationBase, DataSetIO
 # J. Chem. Phys. 8 April 1997; 106 (14): 6082–6085. https://doi.org/10.1063/1.473271
 # --------------------------------------------------------------------
 
-# ----------------------------------------------------------------------
-#            Physical constants (SI) & Unit Conversions Value
-# ----------------------------------------------------------------------
-kB          = 1.380_649e-23                     # J·K⁻¹
-ps_to_s     = 1e-12                             # Convertion value: picoseconds to seconds
-eV_to_J     = 1.6021766208e-19                  # Convertion value: eV to Joules
-Angs_to_m   = 1e-10                             # Convertion value: Angstrom to meter
-# ----------------------------------------------------------------------
 
 import logging
 from logging.handlers import RotatingFileHandler
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("RNEMD")
+
 # ------------------------------------------------------------------------------------------------------------- #
 #                              Velocity Exchange Related Functions:
 # ------------------------------------------------------------------------------------------------------------- #
@@ -1096,21 +1089,13 @@ class RNEMD(ImplementationBase, DataSetIO):
             def get_data_and_write_idx(ds_name):
                 dataset = grp.get(ds_name)
                 if dataset is None:
-                    raise KeyError(f"Recieved an invalid dataset name, {ds_name}. Ensure you've initialized intmd_file appropriately.")
+                    logger.error(f"KeyError/Exception: Recieved an invalid dataset name, {ds_name}. Ensure you've initialized intmd_file appropriately.")
                 n_store_calls, n_items_in_list = dataset.shape
-<<<<<<< HEAD:torch_sim/workflows/nonequilibrium_md/RNEMD.py
-                if vhot_vals_arr.shape != (n_items_in_list,) or vcold_vals_arr.shape != (n_items_in_list,):
-                    raise ValueError(f"rows must have shape ({n_items_in_list},). Recieved rows with dimensions: vhot {vhot_vals_arr.shape} | vcold {vcold_vals_arr.shape}.)")
-||||||| parent of a7ac5ac (Extend RNEMD to multi-species systems via species-matched swaps):torch_sim/workflows/Feugmo_Group/RNEMD.py
-                if vhot_vals_arr.shape != (n_items_in_list,) or vcold_vals_arr.shape != (n_items_in_list,):
-                    logger.error(f"ValueError: rows must have shape ({n_items_in_list},). Recieved rows with dimensions: vhot {vhot_vals_arr.shape} | vcold {vcold_vals_arr.shape}.)")
-=======
                 if vals[ds_name].shape != (n_items_in_list,):
                     logger.error(f"ValueError: rows must have shape ({n_items_in_list},). Recieved row with dimensions: {ds_name} {vals[ds_name].shape}.)")
->>>>>>> a7ac5ac (Extend RNEMD to multi-species systems via species-matched swaps):torch_sim/workflows/Feugmo_Group/RNEMD.py
                 idx = int(dataset.attrs.get('write_idx', 0))
                 if idx >= n_store_calls:
-                    raise IndexError(f"Store full for dataset '/data/{ds_name}' (idx {idx} >= {n_store_calls}).")
+                    logger.error(f"IndexError: Store full for dataset '/data/{ds_name}' (idx {idx} >= {n_store_calls}).")
                 return dataset, idx
 
             new_indices = {}
