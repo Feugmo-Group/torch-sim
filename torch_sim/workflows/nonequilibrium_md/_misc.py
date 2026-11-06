@@ -12,6 +12,18 @@ from torch_sim.integrators import MDState
 from torch_sim.models.interface import ModelInterface
 from torch_sim.autobatching import calculate_memory_scalers, estimate_max_memory_scaler
 
+# ----------------------------------------------------------------------
+#            Physical constants (SI) & Unit Conversions Value
+# ----------------------------------------------------------------------
+kB          = 1.380_649e-23                     # J·K⁻¹
+ps_to_s     = 1e-12                             # Conversion value: picoseconds to seconds
+eV_to_J     = 1.6021766208e-19                  # Conversion value: eV to Joules
+Angs_to_m   = 1e-10                             # Conversion value: Angstrom to meter
+amu_to_kg   = 1.660-27                          # Conversion value: amu to kilogram
+k_conversion = eV_to_J / (Angs_to_m * ps_to_s)  # Conversion value: k_md to k_si
+n_conversion = eV_to_J * ps_to_s/(Angs_to_m**3) # Conversion value: n_md to n_si (n = Pa * s = J*s/m^3)
+d_conversion = Angs_to_m**2 / ps_to_s           # Conversion value: d_md to d_si (d= m^2/s)
+# ----------------------------------------------------------------------
 
 class ImplementationBase():
     def __init__(
@@ -37,9 +49,11 @@ class ImplementationBase():
             geometry_optimizer: tuple[Callable, Callable] = (fire_init, fire_step),
             optimizer_convergence_fn: Callable=None,
             # Data and log files parameter:
+            state_store_frequency: list[int] | int =None, # Defaults to initial and final state store only
             data_folder_path_abs: PathLike=None,
             simulation_data_filename: str='simulation_data',
             equilibration_data_filename: str='equilibrium_data',
+            relaxation_data_filename: str='relaxation_data',
             display_pbar=False,
             log_to_file: bool=True,
     ):
@@ -49,6 +63,7 @@ class ImplementationBase():
         self.system_state, self.device, self.dtype = system_state, system_state.device, system_state.dtype
         self.temp_K = temp_K
         self.simulation_timestep = timestep_ps
+        self.timestep_s = self.simulation_timestep * ps_to_s
         self.nsteps_total = nsteps_total
         self.model = model
         self.n_simulations = n_simulations
@@ -68,6 +83,18 @@ class ImplementationBase():
 
         # Initializing Data and log files parameters:
         self.display_pbar = display_pbar
+        if state_store_frequency is  None:
+            self.state_store_frequency = [10_000+1, n_equilibration_steps+1, nsteps_total+1] # ts.integrate saves states at t0 and tf automatically
+        elif isinstance(state_store_frequency, list):
+            if len(state_store_frequency)==3:
+                self.state_store_frequency = state_store_frequency
+            else:
+                raise ValueError("(if list) state_store_frequency must be a list of length 3")
+        elif isinstance(state_store_frequency, int):
+            self.state_store_frequency = [state_store_frequency] * 3
+        else:
+            raise ValueError(f"Expected state_store_frequency to be a None, list or integer, got {type(state_store_frequency)}")
+
         if data_folder_path_abs is None:
             # Get the current working directory (from where EMD is being called)
             directory = os.getcwd()
@@ -82,6 +109,7 @@ class ImplementationBase():
             logger.info("Logger initialised to not log to a file")
 
         self.simulation_data_filename = simulation_data_filename
+        self.relaxation_filepath = [os.path.join(self.data_folder_path_abs, f"{relaxation_data_filename}-system-{i}.h5") for i in range(1,n_simulations+1)]
         self.equilibration_filepath = [os.path.join(self.data_folder_path_abs, f"{equilibration_data_filename}-system-{i}.h5") for i in range(1,n_simulations+1)]
         self.simulation_filepath= [os.path.join(self.data_folder_path_abs, f"{simulation_data_filename}-system-{i}.h5") for i in range(1, n_simulations+1)]
 
@@ -149,7 +177,7 @@ class ImplementationBase():
     @staticmethod
     def _perform_geometry_optimization(
             method_instance,
-            logger: logging.Logger=None,
+            logger: logging.Logger,
             ) -> OptimState:
         logger.info("Performing Geometry Optimization...")
         # Optimize/Relax the geometry of the SimulationBox:
@@ -161,9 +189,15 @@ class ImplementationBase():
             force_output = force_convergence_fn(state, last_energy)
             return torch.logical_and(energy_output, force_output)
 
+        relaxation_file_reporter = ts.TrajectoryReporter(
+            filenames=method_instance.relaxation_filepath,
+            state_frequency=method_instance.state_store_frequency[0],
+        )
+
         relaxed_state = ts.runners.optimize(
             system=method_instance.system_state,
             model=method_instance.model,
+            trajectory_reporter=relaxation_file_reporter,
             optimizer= method_instance.geomtery_optimizer,
             convergence_fn= method_instance.optimizer_convergence_fn if method_instance.optimizer_convergence_fn else custom_convergence_fn,
             autobatcher=method_instance.inflight_batcher,
@@ -175,7 +209,7 @@ class ImplementationBase():
     @staticmethod
     def _perform_equilibration(
             method_instance,
-            logger: logging.Logger=None,
+            logger: logging.Logger,
     ) -> MDState:
         """
         Run equilibration integration on the current system_state using the stored simulation parameters.
@@ -193,14 +227,12 @@ class ImplementationBase():
         user_props = {} if not isinstance(method_instance.equilibration_quantities_functions, dict) else method_instance.equilibration_quantities_functions
         equi_prop_to_record = {1: basic_props | user_props}
 
-        if store_equil_data:
-            equilibrium_file_reporter = ts.TrajectoryReporter(
-                filenames=method_instance.equilibration_filepath,
-                prop_calculators=equi_prop_to_record,
-            )
-            logger.info(f"Equilibration Data filepath set to {method_instance.equilibration_filepath}")
-        else:
-            equilibrium_file_reporter = None
+        equilibrium_file_reporter = ts.TrajectoryReporter(
+            filenames=method_instance.equilibration_filepath,
+            state_frequency= method_instance.state_store_frequency[1],
+            prop_calculators=equi_prop_to_record if store_equil_data else None,
+        )
+        logger.info(f"Equilibration Data filepath set to {method_instance.equilibration_filepath}")
 
         system_state= ts.integrate(
             system = method_instance.system_state,
@@ -347,8 +379,3 @@ class DataSetIO:
         with ts.TorchSimTrajectory(filepath) as traj:
             system_simulation_prop = traj.get_array(property_name)
         return system_simulation_prop
-
-
-class WIP():
-    def __init__(self):
-        print("WIP")

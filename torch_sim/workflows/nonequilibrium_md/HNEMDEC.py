@@ -13,18 +13,9 @@ from torch_sim.integrators import MDState
 from torch_sim.models.interface import ModelInterface
 from torch_sim.autobatching import calculate_memory_scalers, estimate_max_memory_scaler
 
-from ._misc import ImplementationBase, DataSetIO
-from .correlation import CorrelationCalculator
-# ----------------------------------------------------------------------
-#            Physical constants (SI) & Unit Conversions Value
-# ----------------------------------------------------------------------
-kB          = 1.380_649e-23                     # J·K⁻¹
-ps_to_s     = 1e-12                             # Convertion value: picoseconds to seconds
-eV_to_J     = 1.6021766208e-19                  # Convertion value: eV to Joules
-Angs_to_m   = 1e-10                             # Convertion value: Angstrom to meter
-amu_to_kg   = 1.660-27                          # Convertion value: amu to kilogram
-# ----------------------------------------------------------------------
-
+from torch_sim.workflows.nonequilibrium_md._misc import ImplementationBase, DataSetIO
+from torch_sim.workflows.nonequilibrium_md.correlation import CorrelationCalculator
+from torch_sim.workflows.nonequilibrium_md._misc import * # Import all the conversion values from _misc
 # --------------------------------------------------------------------
 # Pending: (minor) Documentation and Better Comments + Logging info and variable name changes
 
@@ -34,8 +25,7 @@ amu_to_kg   = 1.660-27                          # Convertion value: amu to kilog
 # --------------------------------------------------------------------
 
 import logging
-from logging.handlers import RotatingFileHandler
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("HNEMDEC")
 
 class HNEMDEC(ImplementationBase, DataSetIO):
     """
@@ -50,23 +40,25 @@ class HNEMDEC(ImplementationBase, DataSetIO):
             timestep_ps: float,
             nsteps_total: int,
             model: ModelInterface,
-            n_simulations: int=5,
-            model_memory_scaling: Literal["n_atoms", "n_atoms_x_density"]="n_atoms_x_density",
+            n_simulations: int = 5,
+            model_memory_scaling: Literal["n_atoms", "n_atoms_x_density"] = "n_atoms_x_density",
             # Equilibration Parameters:
-            perform_equilibration: bool=True,
-            n_equilibration_steps: int=5_000,
-            store_equilibration_data: bool=True,
-            equilibration_quantities_functions: Mapping[str, Callable]=None,
+            perform_equilibration: bool = True,
+            n_equilibration_steps: int = 5_000,
+            store_equilibration_data: bool = True,
+            equilibration_quantities_functions: Mapping[str, Callable] = None,
             # Geometry Optimization Parameters:
-            perform_geometry_optimization: bool=False,
+            perform_geometry_optimization: bool = False,
             geometry_optimizer: tuple[Callable, Callable] = (fire_init, fire_step),
-            optimizer_convergence_fn: Callable=None,
+            optimizer_convergence_fn: Callable = None,
             # Data and log files parameter:
-            data_folder_path_abs: PathLike=None,
-            simulation_data_filename: str='simulation_data',
-            equilibration_data_filename: str='equilibrium_data',
-            display_pbar: bool=False,
-            log_to_file: bool=True,
+            state_store_frequency: list[int] | int = None,  # Defaults to initial and final state store only
+            data_folder_path_abs: PathLike = None,
+            simulation_data_filename: str = 'simulation_data',
+            equilibration_data_filename: str = 'equilibrium_data',
+            relaxation_data_filename: str = 'relaxation_data',
+            display_pbar=False,
+            log_to_file: bool = True,
     )-> None:
         super().__init__(method='HNEMDEC', logger=logger, system_state=system_state, temp_K=temp_K, timestep_ps=timestep_ps,
                          nsteps_total=nsteps_total, model=model, n_simulations=n_simulations,
@@ -77,7 +69,9 @@ class HNEMDEC(ImplementationBase, DataSetIO):
                          optimizer_convergence_fn=optimizer_convergence_fn, data_folder_path_abs=data_folder_path_abs,
                          simulation_data_filename=simulation_data_filename,
                          equilibration_data_filename=equilibration_data_filename, display_pbar=display_pbar,
-                         log_to_file=log_to_file)
+                         log_to_file=log_to_file,
+                         state_store_frequency = state_store_frequency, relaxation_data_filename = relaxation_data_filename
+                         )
 
     # ------------------------------------------------------------------------------------------------------------- #
     #                                      Pre-Simulation Functions:
@@ -142,6 +136,7 @@ class HNEMDEC(ImplementationBase, DataSetIO):
 
         simulation_file_reporter =  ts.TrajectoryReporter(
             filenames=self.simulation_parameters['simulation_filepath'],
+            state_frequency=self.state_store_frequency[-1],
             prop_calculators=simulation_prop_to_record,
         )
 

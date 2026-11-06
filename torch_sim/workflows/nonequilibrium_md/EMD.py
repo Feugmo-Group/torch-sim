@@ -15,19 +15,7 @@ from torch_sim import fire_init, fire_step, gradient_descent_init, gradient_desc
 
 from torch_sim.workflows.nonequilibrium_md._misc import ImplementationBase, DataSetIO
 from torch_sim.workflows.nonequilibrium_md.correlation import CorrelationCalculator
-
-# ----------------------------------------------------------------------
-#            Physical constants (SI) & Unit Conversions Value
-# ----------------------------------------------------------------------
-kB          = 1.380_649e-23                     # J·K⁻¹
-ps_to_s     = 1e-12                             # Conversion value: picoseconds to seconds
-eV_to_J     = 1.6021766208e-19                  # Conversion value: eV to Joules
-Angs_to_m   = 1e-10                             # Conversion value: Angstrom to meter
-amu_to_kg   = 1.660-27                          # Conversion value: amu to kilogram
-k_conversion = eV_to_J / (Angs_to_m * ps_to_s)  # Conversion value: k_md to k_si
-n_conversion = eV_to_J * ps_to_s/(Angs_to_m**3) # Conversion value: n_md to n_si (n = Pa * s = J*s/m^3)
-d_conversion = Angs_to_m**2 / ps_to_s           # Conversion value: d_md to d_si (d= m^2/s)
-# ----------------------------------------------------------------------
+from torch_sim.workflows.nonequilibrium_md._misc import * # Import all the conversion values from _misc
 
 # --------------------------------------------------------------------
 # Pending: (minor) Documentation and Better Comments + Logging info and variable name changes
@@ -51,23 +39,25 @@ class EMD(ImplementationBase, DataSetIO):
             timestep_ps: float,
             nsteps_total: int,
             model: ModelInterface,
-            n_simulations: int=5,
-            model_memory_scaling: Literal["n_atoms", "n_atoms_x_density"]="n_atoms_x_density",
+            n_simulations: int = 5,
+            model_memory_scaling: Literal["n_atoms", "n_atoms_x_density"] = "n_atoms_x_density",
             # Equilibration Parameters:
-            perform_equilibration: bool=True,
-            n_equilibration_steps: int=5_000,
-            store_equilibration_data: bool=True,
-            equilibration_quantities_functions: Mapping[str, Callable]=None,
+            perform_equilibration: bool = True,
+            n_equilibration_steps: int = 5_000,
+            store_equilibration_data: bool = True,
+            equilibration_quantities_functions: Mapping[str, Callable] = None,
             # Geometry Optimization Parameters:
-            perform_geometry_optimization: bool=False,
+            perform_geometry_optimization: bool = False,
             geometry_optimizer: tuple[Callable, Callable] = (fire_init, fire_step),
-            optimizer_convergence_fn: Callable=None,
+            optimizer_convergence_fn: Callable = None,
             # Data and log files parameter:
-            data_folder_path_abs: PathLike=None,
-            simulation_data_filename: str='simulation_data',
-            equilibration_data_filename: str='equilibrium_data',
-            display_pbar: bool=False,
-            log_to_file: bool=True,
+            state_store_frequency: list[int] | int = None,  # Defaults to initial and final state store only
+            data_folder_path_abs: PathLike = None,
+            simulation_data_filename: str = 'simulation_data',
+            equilibration_data_filename: str = 'equilibrium_data',
+            relaxation_data_filename: str = 'relaxation_data',
+            display_pbar=False,
+            log_to_file: bool = True,
     )-> None:
         super().__init__(method='EMD', logger=logger, system_state=system_state, temp_K=temp_K, timestep_ps=timestep_ps,
                          nsteps_total=nsteps_total, model=model, n_simulations=n_simulations,
@@ -78,8 +68,9 @@ class EMD(ImplementationBase, DataSetIO):
                          optimizer_convergence_fn=optimizer_convergence_fn, data_folder_path_abs=data_folder_path_abs,
                          simulation_data_filename=simulation_data_filename,
                          equilibration_data_filename=equilibration_data_filename, display_pbar=display_pbar,
-                         log_to_file=log_to_file)
-        self.timestep_s = self.simulation_timestep * ps_to_s
+                         log_to_file=log_to_file,
+                         state_store_frequency=state_store_frequency, relaxation_data_filename=relaxation_data_filename
+                         )
 
     def run_simulation(
             self,
@@ -91,6 +82,7 @@ class EMD(ImplementationBase, DataSetIO):
             compute_viscosity: bool=False, # Shear Viscosity
             compute_heat_using_energy_dependence: bool=None,
     ) -> None:
+        self.compute_heat_using_energy_dependence = compute_heat_using_energy_dependence
         self.sample_interval = sample_interval
         self.compute_thermal_conductivity = compute_thermal_conductivity
         self.compute_diffusivity = compute_diffusivity
@@ -157,6 +149,7 @@ class EMD(ImplementationBase, DataSetIO):
 
         simulation_file_reporter =  ts.TrajectoryReporter(
             filenames=self.simulation_filepath,
+            state_frequency=self.state_store_frequency[-1],
             prop_calculators=simulation_prop_to_record,
         )
 
@@ -212,7 +205,7 @@ class EMD(ImplementationBase, DataSetIO):
             if self.compute_viscosity:
                 # Shape: (nsteps_total/sample_interval +1, 3)
                 # n = V/Tk_B \int <Pab(x) Pab(0) > where Pab are off diagonal components of pressure tensor
-                pac = self.load_property(self.simulation_file, 'pac')
+                pac = self.load_property(simulation_file, 'pac')
                 factor = vol / (kB * self.temp_K) # since we are using pressure tensor
                 int_term = torch.cumulative_trapezoid(pac, dx=self.timestep_s*self.sample_interval, dim=0)
                 viscosity = factor * int_term * n_conversion
@@ -221,7 +214,7 @@ class EMD(ImplementationBase, DataSetIO):
             if self.compute_diffusivity:
                 # D = 1/3 \int <J(x) J(0) > where J is particle flux
                 # unformatted vac dimensions: (nsteps_total/(window_size*sample_interval)+1, window_size) # +1 dummy value
-                unformatted_vac = self.load_property(self.simulation_file, 'vac')
+                unformatted_vac = self.load_property(simulation_file, 'vac')
                 number_entries = int(self.nsteps_total/(self.window_size*self.sample_interval)*self.window_size)
                 vac = unformatted_vac[1:,:].reshape(number_entries) # dim (nsteps_total/sample_interval,)
                 int_term = torch.cumulative_trapezoid(vac, dx=self.timestep_s*self.sample_interval, dim=0)

@@ -11,19 +11,9 @@ from torch_sim.integrators import MDState
 from torch_sim.models.interface import ModelInterface
 from torch_sim import fire_init, fire_step, gradient_descent_init, gradient_descent_step
 import torch_sim as ts
-from ._misc import ImplementationBase, DataSetIO
+from torch_sim.workflows.nonequilibrium_md._misc import ImplementationBase, DataSetIO
+from torch_sim.workflows.nonequilibrium_md._misc import *  # Import all the conversion values from _misc
 from typing import Literal
-
-# ----------------------------------------------------------------------
-#            Physical constants (SI) & Unit Conversions Value
-# ----------------------------------------------------------------------
-kB          = 1.380_649e-23                     # J·K⁻¹
-ps_to_s     = 1e-12                             # Convertion value: picoseconds to seconds
-eV_to_J     = 1.6021766208e-19                  # Convertion value: eV to Joules
-Angs_to_m   = 1e-10                             # Convertion value: Angstrom to meter
-amu_to_kg   = 1.660e-27                         # Convertion value: amu to kilogram
-k_conversion = eV_to_J / (Angs_to_m * ps_to_s)  # Convertion value: k_md to k_si
-# ----------------------------------------------------------------------
 
 # --------------------------------------------------------------------
 # INCOMPLETE! (Doesn't work because we don't have eigenmodes and frequency calculation)
@@ -37,7 +27,7 @@ k_conversion = eV_to_J / (Angs_to_m * ps_to_s)  # Convertion value: k_md to k_si
 
 import logging
 from logging.handlers import RotatingFileHandler
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("GMKA")
 
 class GMKA(ImplementationBase, DataSetIO):
     """
@@ -51,23 +41,25 @@ class GMKA(ImplementationBase, DataSetIO):
             timestep_ps: float,
             nsteps_total: int,
             model: ModelInterface,
-            n_simulations: int=5,
-            model_memory_scaling: Literal["n_atoms", "n_atoms_x_density"]="n_atoms_x_density",
+            n_simulations: int = 5,
+            model_memory_scaling: Literal["n_atoms", "n_atoms_x_density"] = "n_atoms_x_density",
             # Equilibration Parameters:
-            perform_equilibration: bool=True,
-            n_equilibration_steps: int=5_000,
-            store_equilibration_data: bool=True,
-            equilibration_quantities_functions: Mapping[str, Callable]=None,
+            perform_equilibration: bool = True,
+            n_equilibration_steps: int = 5_000,
+            store_equilibration_data: bool = True,
+            equilibration_quantities_functions: Mapping[str, Callable] = None,
             # Geometry Optimization Parameters:
-            perform_geometry_optimization: bool=False,
+            perform_geometry_optimization: bool = False,
             geometry_optimizer: tuple[Callable, Callable] = (fire_init, fire_step),
-            optimizer_convergence_fn: Callable=None,
+            optimizer_convergence_fn: Callable = None,
             # Data and log files parameter:
-            data_folder_path_abs: PathLike=None,
-            simulation_data_filename: str='simulation_data',
-            equilibration_data_filename: str='equilibrium_data',
-            display_pbar: bool=False,
-            log_to_file: bool=True,
+            state_store_frequency: list[int] | int = None,  # Defaults to initial and final state store only
+            data_folder_path_abs: PathLike = None,
+            simulation_data_filename: str = 'simulation_data',
+            equilibration_data_filename: str = 'equilibrium_data',
+            relaxation_data_filename: str = 'relaxation_data',
+            display_pbar=False,
+            log_to_file: bool = True,
     )-> None:
         super().__init__(method='GKMA', logger=logger, system_state=system_state, temp_K=temp_K, timestep_ps=timestep_ps,
                          nsteps_total=nsteps_total, model=model, n_simulations=n_simulations,
@@ -78,8 +70,11 @@ class GMKA(ImplementationBase, DataSetIO):
                          optimizer_convergence_fn=optimizer_convergence_fn, data_folder_path_abs=data_folder_path_abs,
                          simulation_data_filename=simulation_data_filename,
                          equilibration_data_filename=equilibration_data_filename, display_pbar=display_pbar,
-                         log_to_file=log_to_file)
-        self.timestep_s = self.simulation_timestep * ps_to_s
+                         log_to_file=log_to_file,
+                         state_store_frequency=state_store_frequency, relaxation_data_filename=relaxation_data_filename,
+
+                         )
+
 
     def run_simulation(
             self,
@@ -124,6 +119,7 @@ class GMKA(ImplementationBase, DataSetIO):
         }
         simulation_file_reporter =  ts.TrajectoryReporter(
             filenames=self.simulation_filepath,
+            state_frequency=self.state_store_frequency[-1],
             prop_calculators=simulation_prop_to_record,
         )
 
