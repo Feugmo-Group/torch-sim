@@ -29,7 +29,7 @@ import torch
 import torch_sim as ts
 from torch_sim.models.interface import ModelInterface
 from torch_sim.neighbors import torchsim_nl
-from ..DFTD3_corrections import DFTD3Corrections
+from torch_sim.workflows.nonequilibrium_md.DFTD3_corrections import DFTD3Corrections
 
 try:
     from mace.cli.convert_e3nn_cueq import run as run_e3nn_to_cueq
@@ -382,11 +382,11 @@ class MaceModel(ModelInterface):
 
         if self.compute_correction:
             energy_correction, forces_correction, virial_correction = self.dftd3_corrections.compute_corrections(state_positions=state.positions, state_cell=state.cell,
-                                                       system_idx=state.system_idx, unit_shifts=unit_shifts,
-                                                       state_atomic_numbers=state.atomic_numbers)
+                                                       system_idx=state.system_idx,
+                                                       state_atomic_numbers=state.atomic_numbers, state_pbc=state.pbc)
             results['energy'] = results['energy'] + energy_correction
             results['forces'] = results['forces'] + forces_correction
-            results['virials'] = results['virials'] + virial_correction
+            results['virial'] = results['stress'] + virial_correction
 
         return results
 

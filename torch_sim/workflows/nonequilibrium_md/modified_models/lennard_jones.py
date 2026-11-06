@@ -31,7 +31,7 @@ from torch_sim import transforms
 from torch_sim.models.interface import ModelInterface
 from torch_sim.neighbors import torchsim_nl
 from torch_sim.typing import StateLike
-from ..DFTD3_corrections import DFTD3Corrections
+from torch_sim.workflows.nonequilibrium_md.DFTD3_corrections import DFTD3Corrections
 
 DEFAULT_SIGMA = 1.0
 DEFAULT_EPSILON = 1.0
@@ -484,11 +484,11 @@ class LennardJonesModel(ModelInterface):
 
         if self.compute_correction:
             energy_correction, forces_correction, virial_correction = self.dftd3_corrections.compute_corrections(state_positions=wrapped_positions, state_cell=state.cell,
-                                                                                                                 system_idx=state.system_idx, unit_shifts=shifts_idx,
-                                                                                                                 state_atomic_numbers=state.atomic_numbers)
+                                                                                                                 system_idx=state.system_idx,
+                                                                                                                 state_atomic_numbers=state.atomic_numbers, state_pbc=state.pbc)
             results['energy'] = results['energy'] + energy_correction
             results['forces'] = results['forces'] + forces_correction
-            results['virials'] = results['virials'] + virial_correction
+            results['virial'] = results['virial'] + virial_correction
         if self._compute_external_force:
             if isinstance(state, ts.integrators.MDState): # only compute when doing Molecular Dynamics
                 external_force = self.external_force_fn(atom_energies, state.momenta, state.masses, results['virials'], self.Fe_vec)
