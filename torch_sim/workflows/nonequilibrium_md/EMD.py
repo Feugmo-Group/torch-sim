@@ -13,19 +13,20 @@ from torch_sim.integrators import MDState
 from torch_sim.models.interface import ModelInterface
 from torch_sim import fire_init, fire_step, gradient_descent_init, gradient_descent_step
 
-from ._misc import ImplementationBase, DataSetIO
-from .correlation import CorrelationCalculator
+from torch_sim.workflows.nonequilibrium_md._misc import ImplementationBase, DataSetIO
+from torch_sim.workflows.nonequilibrium_md.correlation import CorrelationCalculator
+
 # ----------------------------------------------------------------------
 #            Physical constants (SI) & Unit Conversions Value
 # ----------------------------------------------------------------------
 kB          = 1.380_649e-23                     # J·K⁻¹
-ps_to_s     = 1e-12                             # Convertion value: picoseconds to seconds
-eV_to_J     = 1.6021766208e-19                  # Convertion value: eV to Joules
-Angs_to_m   = 1e-10                             # Convertion value: Angstrom to meter
-amu_to_kg   = 1.660-27                          # Convertion value: amu to kilogram
-k_conversion = eV_to_J / (Angs_to_m * ps_to_s)  # Convertion value: k_md to k_si
-n_conversion = eV_to_J * ps_to_s/(Angs_to_m**3) # Converstion value: n_md to n_si (n = Pa * s = J*s/m^3)
-d_conversion = Angs_to_m**2 / ps_to_s           # Converstion value: d_md to d_si (d= m^2/s)
+ps_to_s     = 1e-12                             # Conversion value: picoseconds to seconds
+eV_to_J     = 1.6021766208e-19                  # Conversion value: eV to Joules
+Angs_to_m   = 1e-10                             # Conversion value: Angstrom to meter
+amu_to_kg   = 1.660-27                          # Conversion value: amu to kilogram
+k_conversion = eV_to_J / (Angs_to_m * ps_to_s)  # Conversion value: k_md to k_si
+n_conversion = eV_to_J * ps_to_s/(Angs_to_m**3) # Conversion value: n_md to n_si (n = Pa * s = J*s/m^3)
+d_conversion = Angs_to_m**2 / ps_to_s           # Conversion value: d_md to d_si (d= m^2/s)
 # ----------------------------------------------------------------------
 
 # --------------------------------------------------------------------
@@ -36,7 +37,7 @@ d_conversion = Angs_to_m**2 / ps_to_s           # Converstion value: d_md to d_s
 # --------------------------------------------------------------------
 
 import logging
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("EMD")
 
 class EMD(ImplementationBase, DataSetIO):
     """
@@ -99,7 +100,7 @@ class EMD(ImplementationBase, DataSetIO):
         self._window_count = 0
         self._vacf_avg = torch.zeros(window_size, device=self.device)
 
-        if self.nstep_total % sample_interval != 0:
+        if self.nsteps_total % sample_interval != 0:
             raise ValueError("Sample interval doesn't equally divide the total number of steps")
         if not (compute_viscosity or compute_diffusivity or compute_thermal_conductivity):
             raise ValueError('Specify at-least one transport coefficient for computation')
@@ -137,13 +138,23 @@ class EMD(ImplementationBase, DataSetIO):
 
         self.corr_calc_count = 0
 
+
+        # Determine the updator roles and properties to record during sampling interval
+        if self.compute_diffusivity and not (self.compute_viscosity or self.compute_thermal_conductivity):
+            sample_interval_props = {'dummy': self._dummy_update} # use dummy update function since only diffusivity is being computed
+            self.count_update_function, self.calc_update_function = None, None # just to safegaurd against attribute doesn't exist errors
+
+        else:
+            self.determine_updator_roles() # determine the calc and count updator functions
+            sample_interval_props = (({'hac': self._retrieve_hac} if compute_thermal_conductivity else {})
+                                     | ({'pac': self._compute_viscosity} if compute_viscosity else {} ))
+
         # Setting the property recorder to only record crucial data during the simulation
-        self.determine_updator_roles()
         simulation_prop_to_record = {
-            sample_interval: (({'hac': self._retrieve_hac} if compute_thermal_conductivity else {})
-                              | ({'pac': self._compute_viscosity} if compute_viscosity else {} )),
+            sample_interval: sample_interval_props ,
             (window_size*sample_interval): ({'vac': self._compute_diffusivity} if compute_diffusivity else {} ),
         }
+
         simulation_file_reporter =  ts.TrajectoryReporter(
             filenames=self.simulation_filepath,
             prop_calculators=simulation_prop_to_record,
@@ -169,9 +180,8 @@ class EMD(ImplementationBase, DataSetIO):
             things_to_compute.append(0)
         if self.compute_viscosity:
             things_to_compute.append(1)
-        # if self.compute_diffusivity:
-        #     things_to_compute.append(2)
 
+        # Note if only diffusivity is being calculated calc and count update is done by _dummy_update() function
         self.count_update_function = map[max(things_to_compute)]
         self.calc_update_function = map[min(things_to_compute)]
 
@@ -226,6 +236,12 @@ class EMD(ImplementationBase, DataSetIO):
     # ------------------------------------------------------------------------------------------------------------- #
     #                    Functions used to calculate simulation property during integration steps:
     # ------------------------------------------------------------------------------------------------------------- #
+    def _dummy_update(self, state: MDState):
+        # Update the calculator (since only diffusivity is being calculated)
+        self.calc_updator(state)
+        # Update the count (since only diffusivity is being calculated)
+        self.count_updator()
+        return torch.tensor([0]) # return dummy values
 
     def _compute_heat_current(self, state: MDState):
         mass = state.masses
@@ -301,6 +317,7 @@ class EMD(ImplementationBase, DataSetIO):
 
     def _retrieve_vac(self, state):
         # Don't need to update the calculator
+        # Since vac retrival happens on a different freq
 
         if 'velocities' in self.corr_calc[self.corr_calc_count].get_auto_correlations():
             # Based on Torch_Sim's VelocityAutoCorrelation code
