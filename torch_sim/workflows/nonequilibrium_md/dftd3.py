@@ -9,15 +9,9 @@ import io
 
 import torch
 from nvalchemiops.torch.interactions.dispersion import D3Parameters, dftd3
-from nvalchemiops.neighbors import neighbor_list
+from nvalchemiops.torch.neighbors import neighbor_list
+from torch_sim.workflows.nonequilibrium_md._misc import  *
 
-# Unit conversion constants from CODATA 2022 (retrieved 2025-11-12)
-# Bohr radius: 5.291 772 105 44 x 10^-11 m
-# Hartree energy in eV: 27.211 386 245 981 eV
-BOHR_TO_ANGSTROM = 0.529177210544
-HARTREE_TO_EV = 27.211386245981
-ANGSTROM_TO_BOHR = 1.0 / BOHR_TO_ANGSTROM
-EV_TO_HARTREE = 1.0 / HARTREE_TO_EV
 
 class DFTD3Corrections():
     """DFT-D3 corrections based on nvidia's alchemiops toolkit"""
@@ -36,7 +30,7 @@ class DFTD3Corrections():
         https://www.chemie.uni-bonn.de/grimme/de/software/dft-d3/bj_damping
         """
         # Loading the dftd3 parameters from the parameter file
-        self.dftd3_parameters = self.load_dftd3_params(parameter_file, save_params)
+        self.dftd3_parameters = self.load_dftd3_params(parameter_file)
 
         # Maximum radius for calculation the dftd3 dispersion (in Bohr)
         self.r_max = r_max * ANGSTROM_TO_BOHR # neighbor list expects cutoff radius in bohr
@@ -91,8 +85,8 @@ class DFTD3Corrections():
         return energy, forces, virial
 
     @staticmethod
-    def load_dftd3_params(parameter_file: Path=None, save_params: bool=True):
-
+    def load_dftd3_params(parameter_file: Path=None):
+        save_params = False
         # Check if parameter_file ends in .pt:
 
         # If a path is provided and corresponds to a .pt file, load the parameters directly.
@@ -106,10 +100,12 @@ class DFTD3Corrections():
         # If a path is provided but it is not a .pt file, assume it points to a directory containing source files (.f) and generate parameters from it.
         elif isinstance(parameter_file, Path) and not parameter_file.is_file() and parameter_file.suffix != ".pt":
             params = extract_dftd3_parameters(parameter_file)
+            save_params = True
 
         # If no path provided and defaults are missing, generate parameters by downloading source files.
         else:
             params = extract_dftd3_parameters(parameter_file)
+            save_params = True
 
         # Save Params:
         if save_params:

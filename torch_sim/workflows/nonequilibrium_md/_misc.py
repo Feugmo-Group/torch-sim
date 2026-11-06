@@ -20,9 +20,17 @@ ps_to_s     = 1e-12                             # Conversion value: picoseconds 
 eV_to_J     = 1.6021766208e-19                  # Conversion value: eV to Joules
 Angs_to_m   = 1e-10                             # Conversion value: Angstrom to meter
 amu_to_kg   = 1.660-27                          # Conversion value: amu to kilogram
+# Unit conversion constants from CODATA 2022 (retrieved 2025-11-12)
+BOHR_TO_ANGSTROM = 0.529177210544 # Bohr radius: 5.291 772 105 44 x 10^-11 m
+HARTREE_TO_EV = 27.211386245981 # Hartree energy in eV: 27.211 386 245 981 eV
+ANGSTROM_TO_BOHR = 1.0 / BOHR_TO_ANGSTROM
+EV_TO_HARTREE = 1.0 / HARTREE_TO_EV
+
+# Conversion Value:
 k_conversion = eV_to_J / (Angs_to_m * ps_to_s)  # Conversion value: k_md to k_si
 n_conversion = eV_to_J * ps_to_s/(Angs_to_m**3) # Conversion value: n_md to n_si (n = Pa * s = J*s/m^3)
 d_conversion = Angs_to_m**2 / ps_to_s           # Conversion value: d_md to d_si (d= m^2/s)
+
 # ----------------------------------------------------------------------
 
 class ImplementationBase():

@@ -29,7 +29,7 @@ import torch
 import torch_sim as ts
 from torch_sim.models.interface import ModelInterface
 from torch_sim.neighbors import torchsim_nl
-from torch_sim.workflows.nonequilibrium_md.DFTD3_corrections import DFTD3Corrections
+from torch_sim.workflows.nonequilibrium_md.dftd3 import DFTD3Corrections
 
 try:
     from mace.cli.convert_e3nn_cueq import run as run_e3nn_to_cueq
