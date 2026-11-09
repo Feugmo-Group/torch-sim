@@ -8,8 +8,12 @@ import re
 import io
 
 import torch
+# Remove _build_csr_neighbor_list and _sort_neighbors_for_csr if we can merge with latest version of torchsim
+# and import from transforms
+from torch_sim import transforms
 from nvalchemiops.torch.interactions.dispersion import D3Parameters, dftd3
-from nvalchemiops.torch.neighbors import neighbor_list
+# from nvalchemiops.torch.neighbors import neighbor_list
+from torch_sim.neighbors import torchsim_nl
 from torch_sim.workflows.nonequilibrium_md._misc import  *
 
 
@@ -17,13 +21,13 @@ class DFTD3Corrections():
     """DFT-D3 corrections based on nvidia's alchemiops toolkit"""
     def __init__(
             self,
+            r_max: torch.Tensor,
             parameter_file=None,
-            r_max: float=50,
             a1: float=0.4145,
             a2: float=4.8593,
             s6: float=1.0,
             s8: float=1.2177,
-            save_params: bool=True,
+            neighbor_list_fn: Callable=torchsim_nl,
     ):
         """
         For List of functionals and coefficients for BJ-damping refer to: (Table: s6 a1 s8 a2)
@@ -31,14 +35,16 @@ class DFTD3Corrections():
         """
         # Loading the dftd3 parameters from the parameter file
         self.dftd3_parameters = self.load_dftd3_params(parameter_file)
-
+        if not isinstance(r_max, torch.Tensor):
+            raise ValueError(f"Expected r_max to be a torch.Tensor, got {type(r_max)}")
         # Maximum radius for calculation the dftd3 dispersion (in Bohr)
-        self.r_max = r_max * ANGSTROM_TO_BOHR # neighbor list expects cutoff radius in bohr
+        self.r_max = r_max                    # assume neighbor_fn expect Angs (is the cause for torchsim_nl)
         self.a1 = a1                          # BJ damping parameter
         self.a2 = a2                          # BJ damping radius
         self.s6 = s6                          # C6 term coefficient
         self.s8 = s8                            # C8 term coefficient
 
+        self.neighbor_list_fn = neighbor_list_fn
 
     def compute_corrections(
             self,
@@ -51,15 +57,24 @@ class DFTD3Corrections():
 
         state_atomic_numbers = state_atomic_numbers.to(torch.int32)
         system_idx = system_idx.to(torch.int32)
+        state_cell = state_cell.contiguous()
 
         # Generate the neighbor list based on r_max
-        mapping, neigh_ptr, shifts_idx = neighbor_list(
-            positions=state_positions,
-            cutoff=self.r_max,
-            cell=state_cell,
-            pbc=state_pbc,
-            return_neighbor_list=True,
-            batch_idx=system_idx,
+        mapping, neigh_ptr, shifts_idx = self.neighbor_list_fn(
+            state_positions,
+            state_cell.mT, #torch_nl example uses state.row_vector_cell
+            state_pbc,
+            self.r_max,
+            system_idx,
+        )
+        # Build CSR inputs
+        mapping, neigh_ptr, shifts_idx =  (
+            _build_csr_neighbor_list(
+                mapping,
+                neigh_ptr,
+                shifts_idx,
+                state_positions.shape[0],
+            )
         )
 
         # Compute dftd3 corrections using nvidia alchemi toolkit ops
@@ -116,7 +131,35 @@ class DFTD3Corrections():
             print(f"Saved parameters to: {params_file}")
         return params
 
+def _sort_neighbors_for_csr(
+    mapping: torch.Tensor,
+    system_mapping: torch.Tensor,
+    shifts_idx: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Group neighbor-list entries by central atom for CSR kernels."""
+    if mapping.shape[1] == 0:
+        return mapping, system_mapping, shifts_idx
+    original_order = torch.arange(mapping.shape[1], device=mapping.device)
+    order = torch.argsort(mapping[0] * mapping.shape[1] + original_order)
+    return mapping[:, order], system_mapping[order], shifts_idx[order]
 
+
+
+def _build_csr_neighbor_list(
+    mapping: torch.Tensor,
+    system_mapping: torch.Tensor,
+    shifts_idx: torch.Tensor,
+    n_atoms: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Build CSR inputs for kernels that require neighbors grouped by center atom."""
+    mapping, _system_mapping, shifts_idx = _sort_neighbors_for_csr(
+        mapping, system_mapping, shifts_idx
+    )
+    neighbor_ptr = torch.zeros(n_atoms + 1, dtype=torch.int32, device=mapping.device)
+    neighbor_ptr[1:] = (
+        torch.bincount(mapping[0], minlength=n_atoms).cumsum(0).to(torch.int32)
+    )
+    return mapping.to(torch.int32), neighbor_ptr, shifts_idx.to(torch.int32)
 
 
 # SPDX-License-Identifier: Apache-2.0
