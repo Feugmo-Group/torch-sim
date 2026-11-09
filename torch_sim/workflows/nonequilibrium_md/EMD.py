@@ -196,7 +196,7 @@ class EMD(ImplementationBase, DataSetIO):
             simulation_file = self.simulation_filepath[i]
             if self.compute_thermal_conductivity:
                 # Shape: (nsteps_total / sample_interval + 1, 3) or (nsteps_total/sample_interval, 5)
-                hac = self.load_property(simulation_file, 'hac')
+                hac = torch.tensor(self.load_property(simulation_file, 'hac'), dtype=self.dtype, device=self.device)
                 factor = 1 / (self.temp_K * self.temp_K * kB * vol)
                 int_term = torch.cumulative_trapezoid(hac, dx=(self.timestep_s * self.sample_interval), dim=0)
                 thermal_conductivity = factor * int_term * k_conversion
@@ -205,7 +205,7 @@ class EMD(ImplementationBase, DataSetIO):
             if self.compute_viscosity:
                 # Shape: (nsteps_total/sample_interval +1, 3)
                 # n = V/Tk_B \int <Pab(x) Pab(0) > where Pab are off diagonal components of pressure tensor
-                pac = self.load_property(simulation_file, 'pac')
+                pac = torch.tensor(self.load_property(simulation_file, 'pac'), dtype=self.dtype, device=self.device)
                 factor = vol / (kB * self.temp_K) # since we are using pressure tensor
                 int_term = torch.cumulative_trapezoid(pac, dx=self.timestep_s*self.sample_interval, dim=0)
                 viscosity = factor * int_term * n_conversion
@@ -214,7 +214,7 @@ class EMD(ImplementationBase, DataSetIO):
             if self.compute_diffusivity:
                 # D = 1/3 \int <J(x) J(0) > where J is particle flux
                 # unformatted vac dimensions: (nsteps_total/(window_size*sample_interval)+1, window_size) # +1 dummy value
-                unformatted_vac = self.load_property(simulation_file, 'vac')
+                unformatted_vac = torch.tensor(self.load_property(simulation_file, 'vac'), dtype=self.dtype, device=self.device)
                 number_entries = int(self.nsteps_total/(self.window_size*self.sample_interval)*self.window_size)
                 vac = unformatted_vac[1:,:].reshape(number_entries) # dim (nsteps_total/sample_interval,)
                 int_term = torch.cumulative_trapezoid(vac, dx=self.timestep_s*self.sample_interval, dim=0)

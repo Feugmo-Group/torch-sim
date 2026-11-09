@@ -137,7 +137,7 @@ class HNEMD(ImplementationBase, DataSetIO):
         for simulation_idx in range(len(self.simulation_filepath)):
             sim_filepath = self.simulation_filepath[simulation_idx]
             # Compute < J(t) >_ne (eqn 6)
-            hac = self.load_property(sim_filepath, "HAC")
+            hac = torch.tensor(self.load_property(sim_filepath, "HAC"), dtype=self.dtype, device=self.device)
             J_ne = (factor * torch.cumulative_trapezoid(hac, dx=self.timestep_s*self.sample_interval, dim=0)) * self.Fe_vec
 
             # Compute k(t) (eqn 9)
